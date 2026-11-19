@@ -1,5 +1,6 @@
 # Never commit build artifacts or large binaries to this source repo
 *.ipa
+*.tipa
 *.app/
 *.dSYM/
 out/

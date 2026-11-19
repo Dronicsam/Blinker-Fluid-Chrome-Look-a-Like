@@ -29,6 +29,7 @@ content/browser/renderer_host/web_menu_runner_ios.mm
 content/gpu/in_process_gpu_thread.cc
 content/shell/BUILD.gn
 content/shell/app/ios/ios-app.plist
+content/shell/app/ios/resources/artwork/omivayka-icon.png
 content/shell/app/ios/shell_application_ios.mm
 content/shell/app/shell_main.cc
 content/shell/app/shell_main_delegate.cc
@@ -94,6 +95,7 @@ third_party/blink/renderer/platform/media/web_media_player_impl.cc
 third_party/crashpad/crashpad/client/crash_handler_ios.cc
 third_party/crashpad/crashpad/util/mach/exc_server_variants.cc
 tools/blinker/diagnostics_test.cc
+tools/blinker/package_omivayka_jit.py
 tools/blinker/run_host_tests.sh
 ui/accelerated_widget_mac/BUILD.gn
 ui/accelerated_widget_mac/ca_layer_frame_sink_provider.h
