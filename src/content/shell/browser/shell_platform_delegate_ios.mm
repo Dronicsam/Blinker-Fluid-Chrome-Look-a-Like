@@ -95,6 +95,7 @@ bool BlinkShellIsInAuthFlow();
 }  // namespace content
 
 static NSString* BlinkL(NSString* english);
+static NSString* const kBlinkTabsChanged = @"BlinkTabsChanged";
 static NSString* const kBlinkDownloadAttentionChanged =
     @"BlinkDownloadAttentionChanged";
 static NSString* const kBlinkGoogleAvatarFile = @"google-profile-avatar.png";
@@ -432,7 +433,7 @@ constexpr std::array kSearchEngines = {
                  "https://api.bing.com/osjson.aspx?query="},
     SearchEngine{"Yahoo", "https://search.yahoo.com/search?p=",
                  "https://search.yahoo.com/sugg/os?output=fxjson&command="},
-    SearchEngine{"Blinker Fluid (Google)", "https://www.google.com/search?q=",
+    SearchEngine{"Omivayka Browser (Google)", "https://www.google.com/search?q=",
                  "https://suggestqueries.google.com/complete/"
                  "search?client=firefox&q="},
 };
@@ -449,10 +450,7 @@ bool BlinkPrivateSession() {
   return active;
 }
 
-// The app's single theme color, used for both the toolbar/nav-bar background
-// and the menu/start-page accent. Warm red-orange (matching the
-// ungoogled-chromium icon) in a normal session; a dark purple in a private
-// session so the whole UI signals off-the-record at a glance.
+// The menu and navigation accents also signal when the session is private.
 UIColor* BlinkerThemeColor() {
   if (BlinkPrivateSession()) {
     return [UIColor colorWithRed:130 / 255.0
@@ -1198,17 +1196,17 @@ extern "C" void BlinkShellWillCloseReactivate(
 
 @interface ContentShellWindowDelegate
     : UIViewController <UITextFieldDelegate,
-                        UIPopoverPresentationControllerDelegate> {
+                        UIPopoverPresentationControllerDelegate,
+                        UIViewControllerTransitioningDelegate,
+                        UITableViewDataSource,
+                        UITableViewDelegate> {
  @private
   raw_ptr<content::Shell> _shell;
 }
-// Toolbar containing navigation buttons and |urlField|.
-@property(nonatomic, strong) UIStackView* toolbarBackgroundView;
-// A real UIView behind the stack's arranged content. UIStackView itself did
-// not paint backgrounds reliably before iOS 13.
-@property(nonatomic, strong) UIView* toolbarPaintView;
-@property(nonatomic, strong) NSArray<NSLayoutConstraint*>* topPosConstraints;
-@property(nonatomic, strong) NSArray<NSLayoutConstraint*>* bottomPosConstraints;
+@property(nonatomic, strong) UIView* addressBar;
+@property(nonatomic, strong) UIView* toolbarBackgroundView;
+@property(nonatomic, strong)
+    NSArray<NSLayoutConstraint*>* contentVerticalConstraints;
 @property(nonatomic, strong)
     NSArray<NSLayoutConstraint*>* contentHorizontalConstraints;
 @property(nonatomic, strong)
@@ -1216,14 +1214,14 @@ extern "C" void BlinkShellWillCloseReactivate(
 @property(nonatomic, assign) CGFloat keyboardViewportInset;
 // The native Blinker Fluid start page, shown over a blank tab.
 @property(nonatomic, strong) BlinkerStartPageView* startPage;
-// Toolbar containing navigation buttons and |urlField|.
+// The controls above the bottom safe area.
 @property(nonatomic, strong) UIStackView* toolbarContentView;
 // Button to navigate backwards.
 @property(nonatomic, strong) UIButton* backButton;
 // Button to navigate forwards.
 @property(nonatomic, strong) UIButton* forwardButton;
-// Button that either refresh the page or stops the page load.
-@property(nonatomic, strong) UIButton* reloadOrStopButton;
+@property(nonatomic, strong) UIButton* tabsButton;
+@property(nonatomic, strong) UILabel* tabCountLabel;
 // Button that shows the menu
 @property(nonatomic, strong) UIButton* menuButton;
 // Text field used for navigating to URLs.
@@ -1232,8 +1230,7 @@ extern "C" void BlinkShellWillCloseReactivate(
 @property(nonatomic, strong) UIView* contentView;
 @property(nonatomic, strong) UIProgressView* loadingProgressView;
 @property(nonatomic, strong) UIActivityIndicatorView* pullSpinner;
-@property(nonatomic, strong)
-    NSArray<NSLayoutConstraint*>* loadingProgressConstraints;
+@property(nonatomic, assign) BOOL pageLoading;
 @property(nonatomic, strong) UIView* privacyLockView;
 @property(nonatomic, strong) CLLocationManager* permissionLocationManager;
 // Manages tracing and tracing state.
@@ -1243,8 +1240,6 @@ extern "C" void BlinkShellWillCloseReactivate(
 + (UIColor*)backgroundColorTracing;
 - (id)initWithShell:(content::Shell*)shell;
 - (content::Shell*)shell;
-- (UIStackView*)createToolbarBackgroundView;
-- (UIStackView*)createToolbarContentView;
 - (UIButton*)makeButton:(NSString*)imageName action:(SEL)action;
 - (UITextField*)makeURLBar;
 - (void)back;
@@ -1252,7 +1247,19 @@ extern "C" void BlinkShellWillCloseReactivate(
 - (void)reloadOrStop;
 - (void)restartApplication;
 - (void)togglePrivateBrowsing;
-- (void)applyToolbarPosition;
+- (void)createBrowserChrome;
+- (void)layoutBrowserContent;
+- (void)updateBackground;
+- (void)updatePageLoading:(BOOL)loading;
+- (void)updateTabCount;
+- (void)updateMainMenuLoadingRow;
+- (void)openNewTab;
+- (void)showTabSwitcher;
+- (void)showMainMenu;
+- (void)openUserInput:(NSString*)input;
+- (void)searchTextChanged;
+- (void)hideSuggestions;
+- (void)showSuggestions:(NSArray<NSString*>*)titles;
 - (UIImage*)googleProfileImage;
 - (UIImage*)googleSecondaryProfileImage;
 - (NSString*)googleProfileSubtitle;
@@ -1344,7 +1351,7 @@ extern "C" void BlinkOverscrollPull(float pull_points, bool allowed) {
 @property(nonatomic, strong) NSArray* titleColors;
 @property(nonatomic, assign) NSInteger protectedIndex;  // -1 = none
 @property(nonatomic, assign) BOOL isTabList;  // YES = emit TAB_MANAGER_UI logs
-@property(nonatomic, assign) BOOL compactRows;
+@property(nonatomic, assign) BOOL isMainMenu;
 @property(nonatomic, assign) BOOL dismissOnSelect;
 @property(nonatomic, assign) BOOL dismissOnAdd;
 @property(nonatomic, copy) void (^onSelect)(NSInteger);
@@ -1384,7 +1391,7 @@ extern "C" void BlinkOverscrollPull(float pull_points, bool allowed) {
   UIColor* bg = [UIColor colorWithWhite:0.09 alpha:1.0];
   self.tableView.backgroundColor = bg;
   self.tableView.separatorColor = [UIColor colorWithWhite:0.22 alpha:1.0];
-  self.tableView.rowHeight = self.isTabList ? 76 : (self.compactRows ? 48 : 58);
+  self.tableView.rowHeight = self.isTabList ? 76 : (self.isMainMenu ? 48 : 58);
   self.tableView.tableFooterView = [[UIView alloc] init];
   [self applyNavigationBarAppearance];
 }
@@ -1405,14 +1412,19 @@ extern "C" void BlinkOverscrollPull(float pull_points, bool allowed) {
   if (!bar) {
     return;
   }
-  UIColor* barColor = BlinkerThemeColor();
-  bar.tintColor = [UIColor whiteColor];
+  UIColor* barColor = self.isMainMenu
+                          ? [UIColor colorWithWhite:0.16 alpha:1]
+                          : BlinkerThemeColor();
+  UIColor* actionColor =
+      self.isMainMenu ? BlinkerAccentColor() : UIColor.whiteColor;
+  bar.tintColor = actionColor;
+  self.navigationItem.rightBarButtonItem.tintColor = actionColor;
   if (@available(iOS 13.0, *)) {
     UINavigationBarAppearance* ap = [[UINavigationBarAppearance alloc] init];
     [ap configureWithOpaqueBackground];
-    // Compact rows change only the table density. They must not silently
-    // switch the navigation bar to the dark table background.
     ap.backgroundColor = barColor;
+    ap.doneButtonAppearance.normal.titleTextAttributes =
+        @{NSForegroundColorAttributeName : actionColor};
     ap.titleTextAttributes =
         @{NSForegroundColorAttributeName : UIColor.whiteColor};
     bar.standardAppearance = ap;
@@ -1907,21 +1919,13 @@ extern "C" void BlinkOverscrollPull(float pull_points, bool allowed) {
 }
 @end
 
-// The native Blinker Fluid start page. A real UIKit view (logo +
-// "Blinker Fluid" + a search box + quick links) shown over a blank tab — so the
-// start page is embedded in the app and never appears as a URL in the bar.
-@interface BlinkerStartPageView
-    : UIView <UITextFieldDelegate, UITableViewDataSource, UITableViewDelegate>
+// A native start page with the browser logo and editable shortcuts.
+@interface BlinkerStartPageView : UIView
 @property(nonatomic, copy) void (^onNavigate)(NSString*);
 @end
 
 @implementation BlinkerStartPageView {
-  UITextField* _search;
   UIStackView* _shortcutGrid;
-  UITableView* _suggestions;
-  NSArray<NSString*>* _suggestionTitles;
-  NSURLSessionDataTask* _suggestionTask;
-  int64_t _suggestionGeneration;
 }
 
 - (instancetype)initWithFrame:(CGRect)frame {
@@ -1937,66 +1941,48 @@ extern "C" void BlinkOverscrollPull(float pull_points, bool allowed) {
     [logo.widthAnchor constraintEqualToConstant:120].active = YES;
     [logo.heightAnchor constraintEqualToConstant:120].active = YES;
 
-    _search = [[UITextField alloc] init];
-    _search.placeholder = @"Search or type URL";
-    _search.backgroundColor = [UIColor colorWithRed:0.122
-                                              green:0.122
-                                               blue:0.137
-                                              alpha:1.0];
-    _search.textColor = [UIColor whiteColor];
-    _search.font = [UIFont systemFontOfSize:17];
-    _search.layer.cornerRadius = 26;
-    if (@available(iOS 13.0, *)) {
-      _search.layer.cornerCurve = kCACornerCurveContinuous;
-    }
-    _search.layer.borderWidth = 1;
-    _search.layer.borderColor = BlinkerAccentColor().CGColor;
-    _search.delegate = self;
-    [_search addTarget:self
-                  action:@selector(searchTextChanged)
-        forControlEvents:UIControlEventEditingChanged];
-    _search.returnKeyType = UIReturnKeyGo;
-    _search.autocapitalizationType = UITextAutocapitalizationTypeNone;
-    _search.autocorrectionType = UITextAutocorrectionTypeNo;
-    _search.keyboardType = UIKeyboardTypeWebSearch;
-    _search.clearButtonMode = UITextFieldViewModeWhileEditing;
-    UIView* searchIconContainer =
-        [[UIView alloc] initWithFrame:CGRectMake(0, 0, 44, 44)];
-    UIImageView* searchIcon = [[UIImageView alloc]
-        initWithImage:BlinkSystemImage(@"magnifyingglass")];
-    searchIcon.tintColor = [UIColor colorWithWhite:0.58 alpha:1.0];
-    searchIcon.frame = CGRectMake(14, 12, 20, 20);
-    [searchIconContainer addSubview:searchIcon];
-    _search.leftView = searchIconContainer;
-    _search.leftViewMode = UITextFieldViewModeAlways;
-    [_search.heightAnchor constraintEqualToConstant:52].active = YES;
-
     _shortcutGrid = [self makeShortcutGrid];
 
     UIStackView* column = [[UIStackView alloc]
-        initWithArrangedSubviews:@[ logo, _search, _shortcutGrid ]];
+        initWithArrangedSubviews:@[ logo, _shortcutGrid ]];
     column.axis = UILayoutConstraintAxisVertical;
     column.alignment = UIStackViewAlignmentCenter;
-    column.spacing = 16;
-    [column setCustomSpacing:28 afterView:_search];
+    column.spacing = 28;
     column.translatesAutoresizingMaskIntoConstraints = NO;
-    [self addSubview:column];
+    UIScrollView* scroll = [[UIScrollView alloc] initWithFrame:self.bounds];
+    scroll.autoresizingMask =
+        UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    scroll.contentInsetAdjustmentBehavior = UIScrollViewContentInsetAdjustmentNever;
+    [self addSubview:scroll];
+    [scroll addSubview:column];
 
+    UILayoutGuide* canvas = scroll.contentLayoutGuide;
+    UILayoutGuide* viewport = scroll.frameLayoutGuide;
     NSLayoutConstraint* width =
         [column.widthAnchor constraintEqualToConstant:540];
     width.priority = UILayoutPriorityDefaultHigh;
+    NSLayoutConstraint* height =
+        [canvas.heightAnchor constraintEqualToAnchor:viewport.heightAnchor];
+    height.priority = UILayoutPriorityDefaultLow;
+    NSLayoutConstraint* center =
+        [column.centerYAnchor constraintEqualToAnchor:canvas.centerYAnchor
+                                             constant:-36];
+    center.priority = UILayoutPriorityDefaultLow + 1;
     [NSLayoutConstraint activateConstraints:@[
-      [column.centerXAnchor constraintEqualToAnchor:self.centerXAnchor],
-      [column.centerYAnchor constraintEqualToAnchor:self.centerYAnchor
-                                           constant:-36],
+      [canvas.widthAnchor constraintEqualToAnchor:viewport.widthAnchor],
+      [canvas.heightAnchor constraintGreaterThanOrEqualToAnchor:viewport.heightAnchor],
+      [column.centerXAnchor constraintEqualToAnchor:canvas.centerXAnchor],
+      [column.topAnchor constraintGreaterThanOrEqualToAnchor:canvas.topAnchor
+                                                   constant:16],
+      [column.bottomAnchor constraintLessThanOrEqualToAnchor:canvas.bottomAnchor
+                                                    constant:-16],
       [column.leadingAnchor
-          constraintGreaterThanOrEqualToAnchor:self.leadingAnchor
-                                      constant:24],
+          constraintGreaterThanOrEqualToAnchor:canvas.leadingAnchor
+                                      constant:12],
       [column.trailingAnchor
-          constraintLessThanOrEqualToAnchor:self.trailingAnchor
-                                   constant:-24],
-      [_search.widthAnchor constraintEqualToAnchor:column.widthAnchor],
-      width,
+          constraintLessThanOrEqualToAnchor:canvas.trailingAnchor
+                                   constant:-12],
+      width, height, center,
     ]];
   }
   return self;
@@ -2229,182 +2215,84 @@ extern "C" void BlinkOverscrollPull(float pull_points, bool allowed) {
   }
 }
 
-- (BOOL)textFieldShouldReturn:(UITextField*)textField {
-  [textField resignFirstResponder];
-  if (self.onNavigate && textField.text.length) {
-    self.onNavigate(textField.text);
-    textField.text = @"";
-  }
-  [self hideSuggestions];
-  return YES;
+@end
+
+@interface BlinkMainMenuPresentation : UIPresentationController
+@property(nonatomic, weak) UIView* toolbar;
+@end
+
+@implementation BlinkMainMenuPresentation {
+  UIView* _dimmingView;
 }
 
-#pragma mark - Search suggestions
-
-// Suggestions live on the start page only. The URL bar deliberately has none:
-// it holds the address of the page you are on, and completing against it would
-// send the beginning of every URL you edit to the search provider.
-- (UITableView*)suggestionTable {
-  if (_suggestions) {
-    return _suggestions;
-  }
-  _suggestions = [[UITableView alloc] initWithFrame:CGRectZero
-                                              style:UITableViewStylePlain];
-  _suggestions.dataSource = self;
-  _suggestions.delegate = self;
-  _suggestions.backgroundColor = [UIColor colorWithRed:0.122
-                                                 green:0.122
-                                                  blue:0.137
-                                                 alpha:1.0];
-  _suggestions.separatorColor = [UIColor colorWithWhite:0.2 alpha:1.0];
-  _suggestions.layer.cornerRadius = 12;
-  _suggestions.clipsToBounds = YES;
-  _suggestions.hidden = YES;
-  _suggestions.translatesAutoresizingMaskIntoConstraints = NO;
-  [self addSubview:_suggestions];
-  [NSLayoutConstraint activateConstraints:@[
-    [_suggestions.leadingAnchor constraintEqualToAnchor:_search.leadingAnchor],
-    [_suggestions.trailingAnchor
-        constraintEqualToAnchor:_search.trailingAnchor],
-    [_suggestions.topAnchor constraintEqualToAnchor:_search.bottomAnchor
-                                           constant:8],
-    [_suggestions.heightAnchor constraintLessThanOrEqualToConstant:220],
-  ]];
-  return _suggestions;
+- (BOOL)shouldRemovePresentersView {
+  return NO;
 }
 
-- (void)hideSuggestions {
-  _suggestionTitles = nil;
-  [_suggestionTask cancel];
-  _suggestionTask = nil;
-  _suggestions.hidden = YES;
+- (CGRect)frameOfPresentedViewInContainerView {
+  UIView* container = self.containerView;
+  CGRect bounds = container.bounds;
+  CGRect safe = UIEdgeInsetsInsetRect(bounds, container.safeAreaInsets);
+  UIView* toolbar = self.toolbar;
+  CGFloat bottom = toolbar
+                       ? CGRectGetMinY([toolbar convertRect:toolbar.bounds
+                                                    toView:container])
+                       : CGRectGetMaxY(safe);
+  bottom -= 8;
+  CGFloat width = MAX(0, MIN(520, CGRectGetWidth(safe) - 36));
+  CGFloat height = MAX(0, MIN(620, MIN(CGRectGetHeight(bounds) * 0.67,
+                                    bottom - CGRectGetMinY(safe) - 8)));
+  return CGRectMake(CGRectGetMidX(safe) - width / 2, bottom - height, width,
+                    height);
 }
 
-- (void)searchTextChanged {
-  NSString* term = _search.text ?: @"";
-  // A private session must never hand what is being typed to a search
-  // provider, and the preference (absent means on) can switch it off entirely.
-  NSUserDefaults* defaults = [NSUserDefaults standardUserDefaults];
-  const BOOL enabled =
-      [defaults objectForKey:@"BlinkSearchSuggestions"] == nil ||
-      [defaults boolForKey:@"BlinkSearchSuggestions"];
-  // This request goes out through NSURLSession, which knows nothing about the
-  // proxy configured for the browser's own network stack. Sending it anyway
-  // would put the user's typing on the direct connection they configured Tor
-  // precisely to avoid, so with a proxy set there are no suggestions.
-  const BOOL proxied = [defaults stringForKey:@"BlinkProxy"].length > 0;
-  if (!enabled || proxied || BlinkPrivateSession()) {
-    [self hideSuggestions];
-    return;
-  }
-  if (term.length < 2) {
-    [self hideSuggestions];
-    return;
-  }
-  const SearchEngine& engine = kSearchEngines[g_search_engine];
-  if (engine.suggest[0] == '\0') {
-    [self hideSuggestions];
-    return;
-  }
-
-  NSString* escaped = [term stringByAddingPercentEncodingWithAllowedCharacters:
-                                [NSCharacterSet URLQueryAllowedCharacterSet]];
-  NSURL* url =
-      [NSURL URLWithString:[NSString stringWithFormat:@"%s%@", engine.suggest,
-                                                      escaped ?: @""]];
-  if (!url) {
-    [self hideSuggestions];
-    return;
-  }
-
-  const int64_t generation = ++_suggestionGeneration;
-  [_suggestionTask cancel];
-  __weak BlinkerStartPageView* weakSelf = self;
-  _suggestionTask = [[NSURLSession sharedSession]
-        dataTaskWithURL:url
-      completionHandler:^(NSData* data, NSURLResponse* response,
-                          NSError* error) {
-        if (error || !data) {
-          return;
-        }
-        id parsed = [NSJSONSerialization JSONObjectWithData:data
-                                                    options:0
-                                                      error:nil];
-        // OpenSearch suggestions: ["typed", ["first", "second", ...], ...].
-        if (![parsed isKindOfClass:NSArray.class] || [parsed count] < 2 ||
-            ![parsed[1] isKindOfClass:NSArray.class]) {
-          return;
-        }
-        NSMutableArray<NSString*>* titles = [NSMutableArray array];
-        for (id entry in parsed[1]) {
-          if ([entry isKindOfClass:NSString.class] && titles.count < 6) {
-            [titles addObject:entry];
-          }
-        }
-        dispatch_async(dispatch_get_main_queue(), ^{
-          BlinkerStartPageView* strongSelf = weakSelf;
-          if (!strongSelf || generation != strongSelf->_suggestionGeneration) {
-            return;
-          }
-          [strongSelf showSuggestions:titles];
-        });
-      }];
-  [_suggestionTask resume];
+- (void)presentationTransitionWillBegin {
+  UIView* container = self.containerView;
+  UIControl* backdrop = [[UIControl alloc] initWithFrame:container.bounds];
+  backdrop.autoresizingMask =
+      UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+  _dimmingView = [[UIView alloc] init];
+  _dimmingView.userInteractionEnabled = NO;
+  _dimmingView.backgroundColor = [UIColor colorWithWhite:0 alpha:0.26];
+  [backdrop addSubview:_dimmingView];
+  [backdrop addTarget:self
+               action:@selector(dismissMenu)
+     forControlEvents:UIControlEventTouchUpInside];
+  [container insertSubview:backdrop atIndex:0];
+  self.presentedView.layer.cornerRadius = 16;
+  self.presentedView.clipsToBounds = YES;
+  self.presentedView.accessibilityViewIsModal = YES;
 }
 
-- (void)showSuggestions:(NSArray<NSString*>*)titles {
-  _suggestionTitles = titles;
-  UITableView* table = [self suggestionTable];
-  table.hidden = titles.count == 0;
-  [self bringSubviewToFront:table];
-  [table reloadData];
+- (void)containerViewWillLayoutSubviews {
+  [super containerViewWillLayoutSubviews];
+  CGRect menuFrame = self.frameOfPresentedViewInContainerView;
+  self.presentedView.frame = menuFrame;
+  CGRect dimmingFrame = self.containerView.bounds;
+  dimmingFrame.size.height = CGRectGetMaxY(menuFrame) + 8;
+  _dimmingView.frame = dimmingFrame;
 }
 
-- (NSInteger)tableView:(UITableView*)table
-    numberOfRowsInSection:(NSInteger)section {
-  return _suggestionTitles.count;
-}
-
-- (UITableViewCell*)tableView:(UITableView*)table
-        cellForRowAtIndexPath:(NSIndexPath*)path {
-  UITableViewCell* cell =
-      [table dequeueReusableCellWithIdentifier:@"suggestion"];
-  if (!cell) {
-    cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault
-                                  reuseIdentifier:@"suggestion"];
-    cell.backgroundColor = UIColor.clearColor;
-    cell.textLabel.textColor = UIColor.whiteColor;
-  }
-  cell.textLabel.text = _suggestionTitles[path.row];
-  cell.imageView.image = BlinkSystemImage(@"magnifyingglass");
-  cell.imageView.tintColor = BlinkerAccentColor();
-  return cell;
-}
-
-- (void)tableView:(UITableView*)table
-    didSelectRowAtIndexPath:(NSIndexPath*)path {
-  [table deselectRowAtIndexPath:path animated:NO];
-  if (path.row >= (NSInteger)_suggestionTitles.count) {
-    return;
-  }
-  NSString* chosen = _suggestionTitles[path.row];
-  [_search resignFirstResponder];
-  [self hideSuggestions];
-  _search.text = @"";
-  if (self.onNavigate) {
-    self.onNavigate(chosen);
-  }
+- (void)dismissMenu {
+  [self.presentedViewController dismissViewControllerAnimated:YES completion:nil];
 }
 
 @end
 
-@implementation ContentShellWindowDelegate
+@implementation ContentShellWindowDelegate {
+  UITableView* _suggestions;
+  NSLayoutConstraint* _suggestionsHeight;
+  NSArray<NSString*>* _suggestionTitles;
+  NSURLSessionDataTask* _suggestionTask;
+  int64_t _suggestionGeneration;
+  CGFloat _addressKeyboardInset;
+  __weak BlinkListVC* _mainMenu;
+}
 @synthesize backButton = _backButton;
 @synthesize contentView = _contentView;
 @synthesize pullSpinner = _pullSpinner;
 @synthesize urlField = _urlField;
 @synthesize forwardButton = _forwardButton;
-@synthesize reloadOrStopButton = _reloadOrStopButton;
 @synthesize menuButton = _menuButton;
 @synthesize toolbarBackgroundView = _toolbarBackgroundView;
 @synthesize toolbarContentView = _toolbarContentView;
@@ -2412,13 +2300,21 @@ extern "C" void BlinkOverscrollPull(float pull_points, bool allowed) {
 std::unique_ptr<content::ScopedAccessibilityMode> _scopedAccessibilityMode;
 
 - (void)dealloc {
+  [_suggestionTask cancel];
   [[NSNotificationCenter defaultCenter] removeObserver:self];
 }
 
+#if !BUILDFLAG(IS_IOS_TVOS)
+- (UIStatusBarStyle)preferredStatusBarStyle {
+  return UIStatusBarStyleLightContent;
+}
+#endif
+
 + (UIColor*)backgroundColorDefault {
-  // The toolbar background follows the theme color: warm red-orange normally,
-  // dark purple in a private session.
-  return BlinkerThemeColor();
+  if (BlinkPrivateSession()) {
+    return [UIColor colorWithRed:0.16 green:0.11 blue:0.22 alpha:1.0];
+  }
+  return [UIColor colorWithWhite:0.12 alpha:1.0];
 }
 
 + (UIColor*)backgroundColorTracing {
@@ -2445,6 +2341,7 @@ std::unique_ptr<content::ScopedAccessibilityMode> _scopedAccessibilityMode;
       if (!content::Shell::ShouldHideToolbar() &&
           _shell->web_contents()->GetContentNativeView().Get().focused) {
         _toolbarContentView.userInteractionEnabled = YES;
+        _addressBar.userInteractionEnabled = YES;
         [self setNeedsFocusUpdate];
         return;
       }
@@ -2460,6 +2357,7 @@ std::unique_ptr<content::ScopedAccessibilityMode> _scopedAccessibilityMode;
         _shell->web_contents()->GetContentNativeView().Get();
     if (context.nextFocusedView == nativeWebContentsView) {
       _toolbarContentView.userInteractionEnabled = NO;
+      _addressBar.userInteractionEnabled = NO;
       _shell->web_contents()->Focus();
     }
   }
@@ -2471,8 +2369,9 @@ std::unique_ptr<content::ScopedAccessibilityMode> _scopedAccessibilityMode;
   // the toolbar.
   // We set it to true when explicitly pressing the Back button on the remote
   // control in order to focus the toolbar.
-  return _toolbarContentView.userInteractionEnabled ? @[ _toolbarContentView ]
-                                                    : @[ _contentView ];
+  return _toolbarContentView.userInteractionEnabled
+             ? @[ _addressBar, _toolbarContentView ]
+             : @[ _contentView ];
 }
 #endif
 
@@ -2487,79 +2386,10 @@ std::unique_ptr<content::ScopedAccessibilityMode> _scopedAccessibilityMode;
   self.contentView = [[UIView alloc] init];
   [self.view addSubview:_contentView];
 
-  // Create a toolbar.
   if (!content::Shell::ShouldHideToolbar()) {
-    self.toolbarBackgroundView = [self createToolbarBackgroundView];
-    self.toolbarContentView = [self createToolbarContentView];
+    [self createBrowserChrome];
+  }
 
-    self.backButton = [self makeButton:@"ic_back" action:@selector(back)];
-    self.forwardButton = [self makeButton:@"ic_forward"
-                                   action:@selector(forward)];
-    self.reloadOrStopButton = [self makeButton:@"ic_reload"
-                                        action:@selector(reloadOrStop)];
-    self.menuButton = [self makeButton:@"ic_menu"
-                                action:@selector(showMainMenu)];
-    [[NSNotificationCenter defaultCenter]
-        addObserver:self
-           selector:@selector(updateDownloadAttentionBadge)
-               name:kBlinkDownloadAttentionChanged
-             object:nil];
-    [self updateDownloadAttentionBadge];
-    self.urlField = [self makeURLBar];
-    // The toolbar already tints dark purple in a private session via
-    // backgroundColorDefault; just label the empty URL field to match.
-    if (_shell->web_contents()->GetBrowserContext()->IsOffTheRecord()) {
-      _urlField.placeholder = BlinkL(@"Private Browsing");
-    }
-    self.tracingHandler = [[TracingHandler alloc] init];
-
-    [self.view addSubview:_toolbarBackgroundView];
-    [_toolbarBackgroundView addArrangedSubview:_toolbarContentView];
-
-    [_toolbarContentView addArrangedSubview:_backButton];
-    [_toolbarContentView addArrangedSubview:_forwardButton];
-    [_toolbarContentView addArrangedSubview:_reloadOrStopButton];
-    [_toolbarContentView addArrangedSubview:_menuButton];
-    [_toolbarContentView addArrangedSubview:_urlField];
-
-    self.loadingProgressView = [[UIProgressView alloc]
-        initWithProgressViewStyle:UIProgressViewStyleBar];
-    _loadingProgressView.translatesAutoresizingMaskIntoConstraints = NO;
-    _loadingProgressView.progressTintColor = BlinkerAccentColor();
-    _loadingProgressView.trackTintColor = UIColor.clearColor;
-    _loadingProgressView.hidden = YES;
-    [self.view addSubview:_loadingProgressView];
-
-    self.view.accessibilityElements = @[ _toolbarBackgroundView, _contentView ];
-    self.view.isAccessibilityElement = NO;
-
-    // Constraint the toolbar background view. (Vertical position — top vs
-    // bottom — is set by -applyToolbarPosition so it can be toggled in
-    // Settings.)
-    _toolbarBackgroundView.translatesAutoresizingMaskIntoConstraints = NO;
-    [NSLayoutConstraint activateConstraints:@[
-      [_toolbarBackgroundView.leadingAnchor
-          constraintEqualToAnchor:self.view.leadingAnchor],
-      [_toolbarBackgroundView.trailingAnchor
-          constraintEqualToAnchor:self.view.trailingAnchor],
-    ]];
-
-    // Constraint the toolbar content view.
-    _toolbarContentView.translatesAutoresizingMaskIntoConstraints = NO;
-    [NSLayoutConstraint activateConstraints:@[
-      // This height constraint is somewhat arbitrary: the idea is that it gives
-      // us enough space to centralize the buttons inside |_toolbarContentView|
-      // while having enough top and bottom margins.
-      // Twice the size of a button also accounts for platforms such as tvOS,
-      // where focused buttons are larger and have a drop shadow.
-      [_toolbarContentView.heightAnchor
-          constraintEqualToAnchor:_backButton.heightAnchor
-                       multiplier:2.0],
-    ]];
-  }  // if (!content::Shell::ShouldHideToolbar())
-
-  // Constraint the web content view. (Horizontal here; vertical top/bottom is
-  // managed by -applyToolbarPosition together with the toolbar.)
   _contentView.translatesAutoresizingMaskIntoConstraints = NO;
   self.contentHorizontalConstraints = @[
     [_contentView.leadingAnchor
@@ -2568,7 +2398,7 @@ std::unique_ptr<content::ScopedAccessibilityMode> _scopedAccessibilityMode;
         constraintEqualToAnchor:self.view.safeAreaLayoutGuide.trailingAnchor],
   ];
   [NSLayoutConstraint activateConstraints:_contentHorizontalConstraints];
-  [self applyToolbarPosition];
+  [self layoutBrowserContent];
 
   // Enable Accessibility if VoiceOver is already running.
   if (UIAccessibilityIsVoiceOverRunning()) {
@@ -2586,14 +2416,6 @@ std::unique_ptr<content::ScopedAccessibilityMode> _scopedAccessibilityMode;
 
   UIView* webContentsView = _shell->web_contents()->GetNativeView().Get();
   [_contentView addSubview:webContentsView];
-
-  if (@available(ios 17.0, *)) {
-    NSArray<UITrait>* traits = @[ UITraitUserInterfaceStyle.self ];
-    [self registerForTraitChanges:traits
-                       withTarget:self
-                           action:@selector(darkModeDidChange)];
-  }
-  [self darkModeDidChange];
 
   // Restore the persisted appearance (web prefers-color-scheme + iOS chrome).
   NSInteger appearance =
@@ -2656,7 +2478,7 @@ std::unique_ptr<content::ScopedAccessibilityMode> _scopedAccessibilityMode;
   icon.tintColor = BlinkerAccentColor();
   icon.translatesAutoresizingMaskIntoConstraints = NO;
   UILabel* title = [[UILabel alloc] init];
-  title.text = @"Blinker Fluid Locked";
+  title.text = @"Omivayka Browser Locked";
   title.textColor = UIColor.whiteColor;
   title.font = [UIFont systemFontOfSize:23 weight:UIFontWeightBold];
   title.translatesAutoresizingMaskIntoConstraints = NO;
@@ -2705,7 +2527,7 @@ std::unique_ptr<content::ScopedAccessibilityMode> _scopedAccessibilityMode;
   }
   [context
        evaluatePolicy:LAPolicyDeviceOwnerAuthentication
-      localizedReason:@"Unlock your Blinker Fluid browsing session"
+      localizedReason:@"Unlock your Omivayka Browser browsing session"
                 reply:^(BOOL success, NSError* authError) {
                   if (!success) {
                     return;
@@ -2723,13 +2545,6 @@ std::unique_ptr<content::ScopedAccessibilityMode> _scopedAccessibilityMode;
                     }
                   });
                 }];
-}
-
-- (void)darkModeDidChange {
-  BOOL darkModeEnabled =
-      (self.traitCollection.userInterfaceStyle == UIUserInterfaceStyleDark);
-  _urlField.backgroundColor =
-      darkModeEnabled ? [UIColor darkGrayColor] : [UIColor whiteColor];
 }
 
 - (id)initWithShell:(content::Shell*)shell {
@@ -2752,6 +2567,9 @@ std::unique_ptr<content::ScopedAccessibilityMode> _scopedAccessibilityMode;
 - (UIButton*)makeButton:(NSString*)imageName action:(SEL)action {
   UIButton* button = [UIButton buttonWithType:UIButtonTypeSystem];
   UIImage* image = [UIImage imageNamed:imageName];
+  if (!image) {
+    image = BlinkSystemImage(imageName);
+  }
   if (image) {
     image = [image imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
   } else {
@@ -2760,15 +2578,13 @@ std::unique_ptr<content::ScopedAccessibilityMode> _scopedAccessibilityMode;
     // of silently installing a nil (invisible) image.
     NSString* fallback = @"?";
     if ([imageName isEqualToString:@"ic_back"]) {
-      fallback = @"‹";
+      fallback = @"←";
     } else if ([imageName isEqualToString:@"ic_forward"]) {
-      fallback = @"›";
-    } else if ([imageName isEqualToString:@"ic_reload"]) {
-      fallback = @"↻";
-    } else if ([imageName isEqualToString:@"ic_stop"]) {
-      fallback = @"×";
-    } else if ([imageName isEqualToString:@"ic_menu"]) {
-      fallback = @"⋮";
+      fallback = @"→";
+    } else if ([imageName isEqualToString:@"plus"]) {
+      fallback = @"+";
+    } else if ([imageName isEqualToString:@"ellipsis"]) {
+      fallback = @"•••";
     }
     [button setTitle:fallback forState:UIControlStateNormal];
     button.titleLabel.font = [UIFont boldSystemFontOfSize:28.0];
@@ -2776,7 +2592,10 @@ std::unique_ptr<content::ScopedAccessibilityMode> _scopedAccessibilityMode;
   [button setImage:image forState:UIControlStateNormal];
   button.tintColor = [UIColor whiteColor];
   button.imageView.tintColor = [UIColor whiteColor];
+  button.adjustsImageWhenDisabled = YES;
   [button setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+  [button setTitleColor:[UIColor colorWithWhite:0.36 alpha:1]
+                forState:UIControlStateDisabled];
 #if BUILDFLAG(IS_IOS_TVOS)
   [button addTarget:self
                 action:action
@@ -2794,16 +2613,41 @@ std::unique_ptr<content::ScopedAccessibilityMode> _scopedAccessibilityMode;
 
 - (UITextField*)makeURLBar {
   UITextField* field = [[UITextField alloc] init];
-  field.placeholder = @"Search or type URL";
-  field.tintColor = _toolbarBackgroundView.backgroundColor;
-  [field setContentHuggingPriority:UILayoutPriorityDefaultLow - 1
-                           forAxis:UILayoutConstraintAxisHorizontal];
+  NSString* placeholder =
+      _shell->web_contents()->GetBrowserContext()->IsOffTheRecord()
+          ? BlinkL(@"Private Browsing")
+          : BlinkL(@"Search or type URL");
+  field.accessibilityLabel = placeholder;
+  field.attributedPlaceholder = [[NSAttributedString alloc]
+      initWithString:placeholder
+          attributes:@{NSForegroundColorAttributeName :
+                           [UIColor colorWithWhite:0.74 alpha:1]}];
+  field.backgroundColor = [UIColor colorWithWhite:0.20 alpha:1];
+  field.textColor = UIColor.whiteColor;
+  field.tintColor = BlinkerAccentColor();
+  field.font = [UIFont systemFontOfSize:17];
+  field.layer.cornerRadius = 22;
+  field.clipsToBounds = YES;
+  if (@available(iOS 13.0, *)) {
+    field.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
+  }
   field.delegate = self;
-  field.borderStyle = UITextBorderStyleRoundedRect;
+  field.returnKeyType = UIReturnKeyGo;
   field.keyboardType = UIKeyboardTypeWebSearch;
   field.autocapitalizationType = UITextAutocapitalizationTypeNone;
   field.clearButtonMode = UITextFieldViewModeWhileEditing;
   field.autocorrectionType = UITextAutocorrectionTypeNo;
+  UIView* leading = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 42, 44)];
+  UIImageView* searchIcon =
+      [[UIImageView alloc] initWithImage:BlinkSystemImage(@"magnifyingglass")];
+  searchIcon.tintColor = UIColor.whiteColor;
+  searchIcon.frame = CGRectMake(13, 12, 20, 20);
+  [leading addSubview:searchIcon];
+  field.leftView = leading;
+  field.leftViewMode = UITextFieldViewModeAlways;
+  [field addTarget:self
+              action:@selector(searchTextChanged)
+    forControlEvents:UIControlEventEditingChanged];
   UILongPressGestureRecognizer* longPress =
       [[UILongPressGestureRecognizer alloc]
           initWithTarget:self
@@ -2936,77 +2780,156 @@ std::unique_ptr<content::ScopedAccessibilityMode> _scopedAccessibilityMode;
       }];
 }
 
-- (UIStackView*)createToolbarBackgroundView {
-  UIStackView* toolbarBackgroundView = [[UIStackView alloc] init];
+- (void)createBrowserChrome {
+  UIView* address = [[UIView alloc] init];
+  UIView* bottom = [[UIView alloc] init];
+  address.translatesAutoresizingMaskIntoConstraints = NO;
+  bottom.translatesAutoresizingMaskIntoConstraints = NO;
+  self.addressBar = address;
+  self.toolbarBackgroundView = bottom;
 
-  // |toolbarBackgroundView| is a 1-item UIStackView. We use a UIStackView so
-  // that we can:
-  // 1. Easily hide |toolbarContentView| when entering fullscreen mode in a
-  // way that removes it from the layout.
-  // 2. Let UIStackView figure out most constraints for |toolbarContentView|
-  // so that we do not have to do it manually.
-  toolbarBackgroundView.backgroundColor =
-      [ContentShellWindowDelegate backgroundColorDefault];
-  // UIStackView did not render its backgroundColor on iOS 12. Paint its
-  // backing layer as well so the normal orange/private purple toolbar is
-  // visible on every supported OS version.
-  toolbarBackgroundView.layer.backgroundColor =
-      [ContentShellWindowDelegate backgroundColorDefault].CGColor;
-  toolbarBackgroundView.opaque = YES;
+  self.urlField = [self makeURLBar];
+  _urlField.translatesAutoresizingMaskIntoConstraints = NO;
+  [address addSubview:_urlField];
 
-  // On iOS 11/12, setting either UIStackView.backgroundColor or its CALayer's
-  // background can still produce a transparent/black toolbar after layout.
-  // Pin an ordinary UIView behind the arranged content so UIKit has a concrete
-  // orange surface to composite.
-  UIView* paintView = [[UIView alloc] init];
-  paintView.translatesAutoresizingMaskIntoConstraints = NO;
-  paintView.userInteractionEnabled = NO;
-  paintView.backgroundColor =
-      [ContentShellWindowDelegate backgroundColorDefault];
-  paintView.opaque = YES;
-  [toolbarBackgroundView addSubview:paintView];
-  [NSLayoutConstraint activateConstraints:@[
-    [paintView.topAnchor
-        constraintEqualToAnchor:toolbarBackgroundView.topAnchor],
-    [paintView.bottomAnchor
-        constraintEqualToAnchor:toolbarBackgroundView.bottomAnchor],
-    [paintView.leadingAnchor
-        constraintEqualToAnchor:toolbarBackgroundView.leadingAnchor],
-    [paintView.trailingAnchor
-        constraintEqualToAnchor:toolbarBackgroundView.trailingAnchor],
+  self.backButton = [self makeButton:@"ic_back" action:@selector(back)];
+  _backButton.accessibilityLabel = BlinkL(@"Back");
+  _backButton.enabled = NO;
+  self.forwardButton = [self makeButton:@"ic_forward" action:@selector(forward)];
+  _forwardButton.accessibilityLabel = BlinkL(@"Forward");
+  _forwardButton.enabled = NO;
+
+  UIButton* add = [self makeButton:@"plus" action:@selector(openNewTab)];
+  add.accessibilityLabel = BlinkL(@"New Tab");
+  UIView* addCircle = [[UIView alloc] init];
+  addCircle.translatesAutoresizingMaskIntoConstraints = NO;
+  addCircle.userInteractionEnabled = NO;
+  addCircle.backgroundColor = BlinkerAccentColor();
+  addCircle.layer.cornerRadius = 21;
+  [add insertSubview:addCircle atIndex:0];
+
+  UIButton* tabs = [self makeButton:@"square.on.square"
+                            action:@selector(showTabSwitcher)];
+  // The counter is the entire glyph, drawn independently of SF Symbols.
+  [tabs setImage:nil forState:UIControlStateNormal];
+  [tabs setTitle:nil forState:UIControlStateNormal];
+  tabs.accessibilityLabel = BlinkL(@"Tabs");
+  self.tabsButton = tabs;
+  UILabel* count = [[UILabel alloc] init];
+  count.isAccessibilityElement = NO;
+  count.translatesAutoresizingMaskIntoConstraints = NO;
+  count.font = [UIFont monospacedDigitSystemFontOfSize:14
+                                              weight:UIFontWeightSemibold];
+  count.textColor = UIColor.whiteColor;
+  count.textAlignment = NSTextAlignmentCenter;
+  count.layer.borderWidth = 1.75;
+  count.layer.borderColor = UIColor.whiteColor.CGColor;
+  count.layer.cornerRadius = 7;
+  [tabs addSubview:count];
+  self.tabCountLabel = count;
+
+  self.menuButton = [self makeButton:@"ellipsis" action:@selector(showMainMenu)];
+  _menuButton.accessibilityLabel = BlinkL(@"Menu");
+  UIView* menuSurface = [[UIView alloc] init];
+  menuSurface.translatesAutoresizingMaskIntoConstraints = NO;
+  menuSurface.userInteractionEnabled = NO;
+  menuSurface.backgroundColor = [UIColor colorWithWhite:1 alpha:0.10];
+  menuSurface.layer.cornerRadius = 10;
+  [_menuButton insertSubview:menuSurface atIndex:0];
+
+  self.toolbarContentView = [[UIStackView alloc] initWithArrangedSubviews:@[
+    _backButton, _forwardButton, add, tabs, _menuButton
   ]];
-  self.toolbarPaintView = paintView;
-  toolbarBackgroundView.alignment = UIStackViewAlignmentBottom;
-  toolbarBackgroundView.axis = UILayoutConstraintAxisHorizontal;
+  _toolbarContentView.distribution = UIStackViewDistributionFillEqually;
+  _toolbarContentView.translatesAutoresizingMaskIntoConstraints = NO;
+#if BUILDFLAG(IS_IOS_TVOS)
+  _toolbarContentView.userInteractionEnabled = NO;
+  address.userInteractionEnabled = NO;
+#endif
+  [bottom addSubview:_toolbarContentView];
+  [self.view addSubview:address];
+  [self.view addSubview:bottom];
+  [self updateBackground];
 
-  // Use the root view's layout margins (which account for safe areas and the
-  // system's minimum margins).
-  toolbarBackgroundView.layoutMarginsRelativeArrangement = YES;
-  toolbarBackgroundView.preservesSuperviewLayoutMargins = YES;
+  self.loadingProgressView = [[UIProgressView alloc]
+      initWithProgressViewStyle:UIProgressViewStyleBar];
+  _loadingProgressView.translatesAutoresizingMaskIntoConstraints = NO;
+  _loadingProgressView.progressTintColor = BlinkerAccentColor();
+  _loadingProgressView.trackTintColor = UIColor.clearColor;
+  _loadingProgressView.hidden = YES;
+  [self.view addSubview:_loadingProgressView];
 
-  return toolbarBackgroundView;
+  UILayoutGuide* safe = self.view.safeAreaLayoutGuide;
+  [NSLayoutConstraint activateConstraints:@[
+    [address.topAnchor constraintEqualToAnchor:self.view.topAnchor],
+    [address.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
+    [address.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
+    [_urlField.topAnchor constraintEqualToAnchor:safe.topAnchor constant:4],
+    [_urlField.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor
+                                           constant:12],
+    [_urlField.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor
+                                            constant:-12],
+    [_urlField.heightAnchor constraintEqualToConstant:44],
+    [address.bottomAnchor constraintEqualToAnchor:_urlField.bottomAnchor
+                                         constant:6],
+    [bottom.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
+    [bottom.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
+    [bottom.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor],
+    [_toolbarContentView.topAnchor constraintEqualToAnchor:bottom.topAnchor],
+    [_toolbarContentView.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor],
+    [_toolbarContentView.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor],
+    [_toolbarContentView.bottomAnchor constraintEqualToAnchor:safe.bottomAnchor],
+    [_toolbarContentView.heightAnchor constraintEqualToConstant:52],
+    [addCircle.centerXAnchor constraintEqualToAnchor:add.centerXAnchor],
+    [addCircle.centerYAnchor constraintEqualToAnchor:add.centerYAnchor],
+    [addCircle.widthAnchor constraintEqualToConstant:42],
+    [addCircle.heightAnchor constraintEqualToConstant:42],
+    [count.centerXAnchor constraintEqualToAnchor:tabs.centerXAnchor],
+    [count.centerYAnchor constraintEqualToAnchor:tabs.centerYAnchor],
+    [count.widthAnchor constraintEqualToConstant:30],
+    [count.heightAnchor constraintEqualToConstant:28],
+    [menuSurface.centerXAnchor constraintEqualToAnchor:_menuButton.centerXAnchor],
+    [menuSurface.centerYAnchor constraintEqualToAnchor:_menuButton.centerYAnchor],
+    [menuSurface.widthAnchor constraintEqualToConstant:44],
+    [menuSurface.heightAnchor constraintEqualToConstant:34],
+    [_loadingProgressView.leadingAnchor
+        constraintEqualToAnchor:_contentView.leadingAnchor],
+    [_loadingProgressView.trailingAnchor
+        constraintEqualToAnchor:_contentView.trailingAnchor],
+    [_loadingProgressView.topAnchor constraintEqualToAnchor:address.bottomAnchor],
+    [_loadingProgressView.heightAnchor constraintEqualToConstant:2],
+  ]];
+  self.view.accessibilityElements = @[ address, _contentView, bottom ];
+
+  NSNotificationCenter* notifications = NSNotificationCenter.defaultCenter;
+  [notifications addObserver:self
+                    selector:@selector(updateTabCount)
+                        name:kBlinkTabsChanged
+                      object:nil];
+  [notifications addObserver:self
+                    selector:@selector(updateDownloadAttentionBadge)
+                        name:kBlinkDownloadAttentionChanged
+                      object:nil];
+#if !BUILDFLAG(IS_IOS_TVOS)
+  [notifications addObserver:self
+                    selector:@selector(addressKeyboardWillChange:)
+                        name:UIKeyboardWillChangeFrameNotification
+                      object:nil];
+#endif
+  [self updateTabCount];
+  [self updateDownloadAttentionBadge];
 }
 
-- (UIStackView*)createToolbarContentView {
-  UIStackView* toolbarContentView = [[UIStackView alloc] init];
-
-  // Older UIStackView implementations do not reliably paint backgroundColor.
-  UIColor* toolbarColor = [ContentShellWindowDelegate backgroundColorDefault];
-  toolbarContentView.backgroundColor = toolbarColor;
-  toolbarContentView.layer.backgroundColor = toolbarColor.CGColor;
-  toolbarContentView.opaque = YES;
-
-#if BUILDFLAG(IS_IOS_TVOS)
-  // On tvOS, make it impossible to focus `_toolbarContentView` by simply
-  // swiping up on the remote control since this behavior is not intuitive.
-  toolbarContentView.userInteractionEnabled = NO;
-#endif
-
-  toolbarContentView.alignment = UIStackViewAlignmentCenter;
-  toolbarContentView.axis = UILayoutConstraintAxisHorizontal;
-  toolbarContentView.spacing = 16.0;
-
-  return toolbarContentView;
+- (void)updateTabCount {
+  NSString* count = [NSString localizedStringWithFormat:@"%zu",
+      content::Shell::windows().size()];
+  _tabCountLabel.text = count;
+  _tabsButton.accessibilityValue = count;
+  if (_mainMenu) {
+    _mainMenu.titles[3] =
+        [NSString stringWithFormat:@"%@ (%@)", BlinkL(@"Tabs"), count];
+    [_mainMenu.tableView reloadData];
+  }
 }
 
 - (void)back {
@@ -3021,10 +2944,15 @@ std::unique_ptr<content::ScopedAccessibilityMode> _scopedAccessibilityMode;
   UIImpactFeedbackGenerator* feedback = [[UIImpactFeedbackGenerator alloc]
       initWithStyle:UIImpactFeedbackStyleLight];
   [feedback impactOccurred];
+  content::WebContents* contents = _shell->web_contents();
+  if (contents->IsLoading()) {
+    contents->Stop();
+    return;
+  }
   // Reload through the normal navigation path.
-  GURL url = _shell->web_contents()->GetLastCommittedURL();
+  GURL url = contents->GetLastCommittedURL();
   if (!url.is_valid()) {
-    url = _shell->web_contents()->GetVisibleURL();
+    url = contents->GetVisibleURL();
   }
   if (url.is_valid()) {
     _shell->LoadURL(url);
@@ -3042,12 +2970,12 @@ std::unique_ptr<content::ScopedAccessibilityMode> _scopedAccessibilityMode;
   // title and "Restart required" message are already localized.
   UIAlertController* alert = [UIAlertController
       alertControllerWithTitle:BlinkL(@"Private Browsing")
-                       message:BlinkL(@"Blinker Fluid will close. Open it "
+                       message:BlinkL(@"Omivayka Browser will close. Open it "
                                       @"again to apply.")
                 preferredStyle:UIAlertControllerStyleAlert];
   __weak ContentShellWindowDelegate* weakSelf = self;
   [alert
-      addAction:[UIAlertAction actionWithTitle:BlinkL(@"Restart Blinker Fluid")
+      addAction:[UIAlertAction actionWithTitle:BlinkL(@"Restart Omivayka Browser")
                                          style:UIAlertActionStyleDefault
                                        handler:^(UIAlertAction* action) {
                                          [weakSelf restartApplication];
@@ -3228,7 +3156,7 @@ std::unique_ptr<content::ScopedAccessibilityMode> _scopedAccessibilityMode;
     UINavigationController* existing =
         (UINavigationController*)self.presentedViewController;
     if ([existing.topViewController isKindOfClass:[BlinkListVC class]] &&
-        ((BlinkListVC*)existing.viewControllers.firstObject).compactRows) {
+        ((BlinkListVC*)existing.viewControllers.firstObject).isMainMenu) {
       vc.dismissOnAdd = NO;
       [existing pushViewController:vc animated:YES];
       vc.navigationItem.leftBarButtonItem = [[UIBarButtonItem alloc]
@@ -3700,93 +3628,38 @@ std::unique_ptr<content::ScopedAccessibilityMode> _scopedAccessibilityMode;
   BlinkSaveOpenTabs();
 }
 
-// Toolbar position: top (default) or bottom, persisted in NSUserDefaults.
-- (void)applyToolbarPosition {
-  const BOOL hideToolbar =
-      content::Shell::ShouldHideToolbar() || !_toolbarBackgroundView;
-  // Toggling the setting in Settings applies this to EVERY open tab. A tab
-  // whose views are not fully built (e.g. mid-restore) would build constraints
-  // from a nil view/anchor and throw an NSException, taking down the whole app.
-  // Skip it — it applies the current setting itself once its views exist (the
-  // setup path calls this method after creating them).
-  if (!_contentView || (!hideToolbar && !_loadingProgressView)) {
+- (void)layoutBrowserContent {
+  if (!_contentView || _fullscreenConstraints.count) {
     return;
   }
-  [NSLayoutConstraint deactivateConstraints:_topPosConstraints];
-  [NSLayoutConstraint deactivateConstraints:_bottomPosConstraints];
-  if (hideToolbar) {
-    _topPosConstraints = @[
-      [_contentView.topAnchor
-          constraintEqualToAnchor:self.view.safeAreaLayoutGuide.topAnchor],
-      // Extend web content to the true bottom edge (under the home indicator),
-      // as Safari/Chrome do, instead of stopping at the safe-area line — that
-      // gap left the root view showing as an empty white bar at the bottom.
-      [_contentView.bottomAnchor
-          constraintEqualToAnchor:self.view.bottomAnchor
-                         constant:-_keyboardViewportInset],
-    ];
-    _bottomPosConstraints = nil;
-    [NSLayoutConstraint activateConstraints:_topPosConstraints];
-    return;
-  }
-  BOOL bottom =
-      [[NSUserDefaults standardUserDefaults] boolForKey:@"BlinkToolbarBottom"];
-  [NSLayoutConstraint deactivateConstraints:_loadingProgressConstraints];
-  _loadingProgressConstraints = @[
-    [_loadingProgressView.leadingAnchor
-        constraintEqualToAnchor:self.view.leadingAnchor],
-    [_loadingProgressView.trailingAnchor
-        constraintEqualToAnchor:self.view.trailingAnchor],
-    bottom ? [_loadingProgressView.bottomAnchor
-                 constraintEqualToAnchor:_toolbarBackgroundView.topAnchor]
-           : [_loadingProgressView.topAnchor
-                 constraintEqualToAnchor:_toolbarBackgroundView.bottomAnchor],
-    [_loadingProgressView.heightAnchor constraintEqualToConstant:2],
+  [NSLayoutConstraint deactivateConstraints:_contentVerticalConstraints];
+  CGFloat keyboardInset = MAX(_keyboardViewportInset, _addressKeyboardInset);
+  NSLayoutYAxisAnchor* top = _addressBar ? _addressBar.bottomAnchor
+                                         : self.view.safeAreaLayoutGuide.topAnchor;
+  NSLayoutConstraint* bottom =
+      (_toolbarBackgroundView && keyboardInset == 0)
+          ? [_contentView.bottomAnchor
+                constraintEqualToAnchor:_toolbarBackgroundView.topAnchor]
+          : [_contentView.bottomAnchor
+                constraintEqualToAnchor:self.view.bottomAnchor
+                                constant:-keyboardInset];
+  _contentVerticalConstraints = @[
+    [_contentView.topAnchor constraintEqualToAnchor:top], bottom
   ];
-  [NSLayoutConstraint activateConstraints:_loadingProgressConstraints];
-  _topPosConstraints = @[
-    [_toolbarBackgroundView.topAnchor
-        constraintEqualToAnchor:self.view.topAnchor],
-    [_contentView.topAnchor
-        constraintEqualToAnchor:_toolbarBackgroundView.bottomAnchor],
-    // Extend web content to the true bottom edge (under the home indicator)
-    // rather than the safe-area line, which otherwise leaves an empty white
-    // bar.
-    [_contentView.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor
-                                              constant:-_keyboardViewportInset],
-  ];
-  if (_keyboardViewportInset > 0) {
-    // The bottom toolbar remains behind the keyboard. End web content exactly
-    // at the keyboard edge; subtracting both toolbar height and keyboard inset
-    // created the oversized gray gap.
-    _bottomPosConstraints = @[
-      [_toolbarBackgroundView.bottomAnchor
-          constraintEqualToAnchor:self.view.bottomAnchor],
-      [_contentView.topAnchor
-          constraintEqualToAnchor:self.view.safeAreaLayoutGuide.topAnchor],
-      [_contentView.bottomAnchor
-          constraintEqualToAnchor:self.view.bottomAnchor
-                         constant:-_keyboardViewportInset],
-    ];
-  } else {
-    _bottomPosConstraints = @[
-      [_toolbarBackgroundView.bottomAnchor
-          constraintEqualToAnchor:self.view.bottomAnchor],
-      [_contentView.topAnchor
-          constraintEqualToAnchor:self.view.safeAreaLayoutGuide.topAnchor],
-      [_contentView.bottomAnchor
-          constraintEqualToAnchor:_toolbarBackgroundView.topAnchor],
-    ];
-  }
-  [NSLayoutConstraint
-      activateConstraints:bottom ? _bottomPosConstraints : _topPosConstraints];
+  [NSLayoutConstraint activateConstraints:_contentVerticalConstraints];
 }
 
-- (void)setPageLoading:(BOOL)loading {
+- (void)updatePageLoading:(BOOL)loading {
+  self.pageLoading = loading;
+  [self updateMainMenuLoadingRow];
   if (!_loadingProgressView) {
     return;
   }
   [_loadingProgressView.layer removeAllAnimations];
+  if (_addressBar.hidden) {
+    _loadingProgressView.hidden = YES;
+    return;
+  }
   if (loading) {
     _loadingProgressView.hidden = NO;
     [_loadingProgressView setProgress:0.12 animated:NO];
@@ -3799,8 +3672,10 @@ std::unique_ptr<content::ScopedAccessibilityMode> _scopedAccessibilityMode;
     dispatch_after(
         dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.22 * NSEC_PER_SEC)),
         dispatch_get_main_queue(), ^{
-          self.loadingProgressView.hidden = YES;
-          [self.loadingProgressView setProgress:0 animated:NO];
+          if (!self.pageLoading) {
+            self.loadingProgressView.hidden = YES;
+            [self.loadingProgressView setProgress:0 animated:NO];
+          }
         });
   }
 }
@@ -3811,27 +3686,11 @@ std::unique_ptr<content::ScopedAccessibilityMode> _scopedAccessibilityMode;
     return;
   }
   _keyboardViewportInset = clamped;
-  [self applyToolbarPosition];
+  [self layoutBrowserContent];
   [UIView animateWithDuration:0.20
                    animations:^{
                      [self.view layoutIfNeeded];
                    }];
-}
-
-- (void)toggleToolbarPosition {
-  NSUserDefaults* d = [NSUserDefaults standardUserDefaults];
-  [d setBool:![d boolForKey:@"BlinkToolbarBottom"]
-      forKey:@"BlinkToolbarBottom"];
-  for (content::Shell* s : content::Shell::windows()) {
-    UIWindow* w = s->window().Get();
-    if ([w.rootViewController
-            isKindOfClass:[ContentShellWindowDelegate class]]) {
-      ContentShellWindowDelegate* del =
-          (ContentShellWindowDelegate*)w.rootViewController;
-      [del applyToolbarPosition];
-      [w layoutIfNeeded];
-    }
-  }
 }
 
 extern "C" void BlinkSetKeyboardViewportInset(float inset) {
@@ -3864,8 +3723,8 @@ static NSString* BlinkL(NSString* english) {
             @"Engine|Appearance|Toolbar Position|Languages|Ad & Tracker "
             @"Blocking|Tor / Proxy|Password / Face ID Lock|HTTPS-First "
             @"Navigation|Website Permissions|Clear Browsing "
-            @"Data|History|JavaScript Engine|About Blinker "
-            @"Fluid|GENERAL|PRIVACY|PERFORMANCE|ABOUT|System|Light|Dark|Bottom|"
+            @"Data|History|JavaScript Engine|About Omivayka "
+            @"Browser|GENERAL|PRIVACY|PERFORMANCE|ABOUT|System|Light|Dark|Bottom|"
             @"Top|On|Off" componentsSeparatedByString:@"|"];
     NSDictionary<NSString*, NSString*>* joined = @{
       @"es" : @"Menú|Recargar|Nueva "
@@ -3877,15 +3736,15 @@ static NSString* BlinkL(NSString* english) {
               @"anuncios y rastreadores|Tor / Proxy|Bloqueo con contraseña / "
               @"Face ID|Navegación HTTPS primero|Permisos de sitios web|Borrar "
               @"datos de navegación|Historial|Motor JavaScript|Acerca de "
-              @"Blinker Fluid|GENERAL|PRIVACIDAD|RENDIMIENTO|ACERCA "
+              @"Omivayka Browser|GENERAL|PRIVACIDAD|RENDIMIENTO|ACERCA "
               @"DE|Sistema|Claro|Oscuro|Abajo|Arriba|Activado|Desactivado",
       @"zh" : @"菜单|重新加载|新建标签页|标签页|主页|书签|下载|请求移动版网页|"
               @"请求桌面版网页|页面缩放|分享链接|设置|检查更新|最新 GitHub "
               @"版本|浏览器|资料库|应用|搜索引擎|外观|工具栏位置|语言|"
               @"广告与跟踪器拦截|Tor / 代理|密码 / Face ID 锁定|HTTPS "
               @"优先导航|网站权限|清除浏览数据|历史记录|JavaScript 引擎|关于 "
-              @"Blinker "
-              @"Fluid|通用|隐私|性能|关于|系统|浅色|深色|底部|顶部|开启|关闭",
+              @"Omivayka "
+              @"Browser|通用|隐私|性能|关于|系统|浅色|深色|底部|顶部|开启|关闭",
       @"ru" : @"Меню|Обновить|Новая "
               @"вкладка|Вкладки|Главная|Закладки|Загрузки|Запросить мобильную "
               @"версию|Запросить версию для ПК|Масштаб страницы|Поделиться "
@@ -3894,8 +3753,8 @@ static NSString* BlinkL(NSString* english) {
               @"система|Оформление|Положение панели|Языки|Блокировка рекламы и "
               @"трекеров|Tor / Прокси|Блокировка паролем / Face ID|Сначала "
               @"HTTPS|Разрешения сайтов|Очистить данные "
-              @"браузера|История|Движок JavaScript|О Blinker "
-              @"Fluid|ОБЩИЕ|КОНФИДЕНЦИАЛЬНОСТЬ|ПРОИЗВОДИТЕЛЬНОСТЬ|О "
+              @"браузера|История|Движок JavaScript|О Omivayka "
+              @"Browser|ОБЩИЕ|КОНФИДЕНЦИАЛЬНОСТЬ|ПРОИЗВОДИТЕЛЬНОСТЬ|О "
               @"ПРИЛОЖЕНИИ|Системная|Светлая|Тёмная|Снизу|Сверху|Вкл.|Выкл.",
       @"uk" :
           @"Меню|Оновити|Нова "
@@ -3906,8 +3765,8 @@ static NSString* BlinkL(NSString* english) {
           @"система|Вигляд|Положення панелі|Мови|Блокування реклами й "
           @"трекерів|Tor / Проксі|Блокування паролем / Face ID|Спочатку "
           @"HTTPS|Дозволи сайтів|Очистити дані перегляду|Історія|Рушій "
-          @"JavaScript|Про Blinker "
-          @"Fluid|ЗАГАЛЬНІ|КОНФІДЕНЦІЙНІСТЬ|ПРОДУКТИВНІСТЬ|ПРО "
+          @"JavaScript|Про Omivayka "
+          @"Browser|ЗАГАЛЬНІ|КОНФІДЕНЦІЙНІСТЬ|ПРОДУКТИВНІСТЬ|ПРО "
           @"ПРОГРАМУ|Системна|Світла|Темна|Знизу|Зверху|Увімк.|Вимк.",
       @"pl" : @"Menu|Odśwież|Nowa karta|Karty|Strona "
               @"główna|Zakładki|Pobrane|Wersja mobilna|Wersja na "
@@ -3917,8 +3776,8 @@ static NSString* BlinkL(NSString* english) {
               @"Położenie paska|Języki|Blokowanie reklam i elementów "
               @"śledzących|Tor / Proxy|Blokada hasłem / Face ID|Najpierw "
               @"HTTPS|Uprawnienia witryn|Wyczyść dane "
-              @"przeglądania|Historia|Silnik JavaScript|O Blinker "
-              @"Fluid|OGÓLNE|PRYWATNOŚĆ|WYDAJNOŚĆ|INFORMACJE|Systemowy|Jasny|"
+              @"przeglądania|Historia|Silnik JavaScript|O Omivayka "
+              @"Browser|OGÓLNE|PRYWATNOŚĆ|WYDAJNOŚĆ|INFORMACJE|Systemowy|Jasny|"
               @"Ciemny|Dół|Góra|Wł.|Wył.",
       @"cs" :
           @"Nabídka|Načíst znovu|Nový panel|Panely|Domů|Záložky|Stažené "
@@ -3927,8 +3786,8 @@ static NSString* BlinkL(NSString* english) {
           @"GitHub|PROHLÍŽEČ|KNIHOVNA|APLIKACE|Vyhledávač|Vzhled|Poloha "
           @"panelu|Jazyky|Blokování reklam a sledování|Tor / Proxy|Zámek "
           @"heslem / Face ID|Nejprve HTTPS|Oprávnění webů|Vymazat údaje o "
-          @"prohlížení|Historie|JavaScriptový engine|O aplikaci Blinker "
-          @"Fluid|OBECNÉ|SOUKROMÍ|VÝKON|O "
+          @"prohlížení|Historie|JavaScriptový engine|O aplikaci Omivayka "
+          @"Browser|OBECNÉ|SOUKROMÍ|VÝKON|O "
           @"APLIKACI|Systém|Světlý|Tmavý|Dole|Nahoře|Zapnuto|Vypnuto",
       @"de" : @"Menü|Neu laden|Neuer "
               @"Tab|Tabs|Startseite|Lesezeichen|Downloads|Mobile Website "
@@ -3938,8 +3797,8 @@ static NSString* BlinkL(NSString* english) {
               @"Position der Symbolleiste|Sprachen|Werbe- und "
               @"Trackerblocker|Tor / Proxy|Passwort- / Face-ID-Sperre|HTTPS "
               @"zuerst|Website-Berechtigungen|Browserdaten "
-              @"löschen|Verlauf|JavaScript-Engine|Über Blinker "
-              @"Fluid|ALLGEMEIN|DATENSCHUTZ|LEISTUNG|ÜBER|System|Hell|Dunkel|"
+              @"löschen|Verlauf|JavaScript-Engine|Über Omivayka "
+              @"Browser|ALLGEMEIN|DATENSCHUTZ|LEISTUNG|ÜBER|System|Hell|Dunkel|"
               @"Unten|Oben|Ein|Aus",
       @"ja" :
           @"メニュー|再読み込み|新しいタブ|タブ|ホーム|ブックマーク|"
@@ -3949,7 +3808,7 @@ static NSString* BlinkL(NSString* english) {
           @"ツールバーの位置|言語|広告・トラッカーブロック|Tor / "
           @"プロキシ|パスワード / Face ID ロック|HTTPS "
           @"優先ナビゲーション|ウェブサイトの権限|閲覧データを消去|履歴|"
-          @"JavaScript エンジン|Blinker Fluid "
+          @"JavaScript エンジン|Omivayka Browser "
           @"について|一般|プライバシー|パフォーマンス|情報|システム|ライト|"
           @"ダーク|下|上|オン|オフ",
       @"ko" :
@@ -3958,7 +3817,7 @@ static NSString* BlinkL(NSString* english) {
           @"확인|최신 GitHub 릴리스|브라우저|라이브러리|앱|검색 엔진|모양|도구 "
           @"모음 위치|언어|광고 및 추적기 차단|Tor / 프록시|암호 / Face ID "
           @"잠금|HTTPS 우선 탐색|웹사이트 권한|인터넷 사용 기록 "
-          @"삭제|기록|JavaScript 엔진|Blinker Fluid 정보|일반|개인정보 "
+          @"삭제|기록|JavaScript 엔진|Omivayka Browser 정보|일반|개인정보 "
           @"보호|성능|정보|시스템|라이트|다크|아래|위|켜짐|꺼짐",
       @"vi" : @"Trình đơn|Tải lại|Thẻ mới|Các thẻ|Trang chủ|Dấu trang|Tải "
               @"xuống|Yêu cầu trang di động|Yêu cầu trang máy tính|Thu phóng "
@@ -3967,7 +3826,7 @@ static NSString* BlinkL(NSString* english) {
               @"kiếm|Giao diện|Vị trí thanh công cụ|Ngôn ngữ|Chặn quảng cáo và "
               @"trình theo dõi|Tor / Proxy|Khóa bằng mật khẩu / Face ID|Ưu "
               @"tiên HTTPS|Quyền trang web|Xóa dữ liệu duyệt web|Lịch sử|Công "
-              @"cụ JavaScript|Giới thiệu Blinker Fluid|CHUNG|QUYỀN RIÊNG "
+              @"cụ JavaScript|Giới thiệu Omivayka Browser|CHUNG|QUYỀN RIÊNG "
               @"TƯ|HIỆU NĂNG|GIỚI THIỆU|Hệ thống|Sáng|Tối|Dưới|Trên|Bật|Tắt",
       @"tr" : @"Menü|Yeniden Yükle|Yeni Sekme|Sekmeler|Ana Sayfa|Yer "
               @"İmleri|İndirilenler|Mobil Sayfa İste|Masaüstü Sayfa İste|Sayfa "
@@ -3976,7 +3835,7 @@ static NSString* BlinkL(NSString* english) {
               @"Motoru|Görünüm|Araç Çubuğu Konumu|Diller|Reklam ve İzleyici "
               @"Engelleme|Tor / Proxy|Parola / Face ID Kilidi|Önce HTTPS|Web "
               @"Sitesi İzinleri|Tarama Verilerini Temizle|Geçmiş|JavaScript "
-              @"Motoru|Blinker Fluid "
+              @"Motoru|Omivayka Browser "
               @"Hakkında|GENEL|GİZLİLİK|PERFORMANS|HAKKINDA|Sistem|Açık|Koyu|"
               @"Alt|Üst|Açık|Kapalı",
       @"fr" :
@@ -3989,8 +3848,8 @@ static NSString* BlinkL(NSString* english) {
           @"des publicités et traqueurs|Tor / Proxy|Verrouillage par mot de "
           @"passe / Face ID|Navigation HTTPS prioritaire|Autorisations des "
           @"sites|Effacer les données de navigation|Historique|Moteur "
-          @"JavaScript|À propos de Blinker "
-          @"Fluid|GÉNÉRAL|CONFIDENTIALITÉ|PERFORMANCES|À "
+          @"JavaScript|À propos de Omivayka "
+          @"Browser|GÉNÉRAL|CONFIDENTIALITÉ|PERFORMANCES|À "
           @"PROPOS|Système|Clair|Sombre|En bas|En haut|Activé|Désactivé",
       @"sv" : @"Meny|Läs in igen|Ny flik|Flikar|Hem|Bokmärken|Hämtningar|Begär "
               @"mobilwebbplats|Begär datorwebbplats|Sidzoom|Dela "
@@ -3999,8 +3858,8 @@ static NSString* BlinkL(NSString* english) {
               @"Verktygsfältets placering|Språk|Blockering av annonser och "
               @"spårare|Tor / Proxy|Lås med lösenord / Face ID|HTTPS "
               @"först|Webbplatsbehörigheter|Rensa "
-              @"webbinformation|Historik|JavaScript-motor|Om Blinker "
-              @"Fluid|ALLMÄNT|INTEGRITET|PRESTANDA|OM|System|Ljust|Mörkt|"
+              @"webbinformation|Historik|JavaScript-motor|Om Omivayka "
+              @"Browser|ALLMÄNT|INTEGRITET|PRESTANDA|OM|System|Ljust|Mörkt|"
               @"Nederkant|Överkant|På|Av",
       @"ar" :
           @"القائمة|إعادة التحميل|علامة تبويب جديدة|علامات "
@@ -4009,8 +3868,8 @@ static NSString* BlinkL(NSString* english) {
           @"التحديثات|أحدث إصدار على GitHub|المتصفح|المكتبة|التطبيق|محرك "
           @"البحث|المظهر|موضع شريط الأدوات|اللغات|حظر الإعلانات وأدوات "
           @"التتبع|Tor / الوكيل|قفل بكلمة مرور / Face ID|HTTPS أولاً|أذونات "
-          @"المواقع|مسح بيانات التصفح|السجل|محرك JavaScript|حول Blinker "
-          @"Fluid|عام|الخصوصية|الأداء|حول|النظام|فاتح|داكن|أسفل|أعلى|تشغيل|"
+          @"المواقع|مسح بيانات التصفح|السجل|محرك JavaScript|حول Omivayka "
+          @"Browser|عام|الخصوصية|الأداء|حول|النظام|فاتح|داكن|أسفل|أعلى|تشغيل|"
           @"إيقاف",
     };
     NSMutableDictionary* built = [NSMutableDictionary dictionary];
@@ -4030,44 +3889,44 @@ static NSString* BlinkL(NSString* english) {
   NSString* code = [[[accept componentsSeparatedByString:@","] firstObject]
                        componentsSeparatedByString:@"-"]
                        .firstObject.lowercaseString;
-  if ([english isEqualToString:@"Restart Blinker Fluid"]) {
+  if ([english isEqualToString:@"Restart Omivayka Browser"]) {
     return @{
-      @"es" : @"Reiniciar Blinker Fluid",
-      @"zh" : @"重新启动 Blinker Fluid",
-      @"ru" : @"Перезапустить Blinker Fluid",
-      @"uk" : @"Перезапустити Blinker Fluid",
-      @"pl" : @"Uruchom ponownie Blinker Fluid",
-      @"cs" : @"Restartovat Blinker Fluid",
-      @"de" : @"Blinker Fluid neu starten",
-      @"ja" : @"Blinker Fluid を再起動",
-      @"ko" : @"Blinker Fluid 재시작",
-      @"vi" : @"Khởi động lại Blinker Fluid",
-      @"tr" : @"Blinker Fluid’ı Yeniden Başlat",
-      @"fr" : @"Redémarrer Blinker Fluid",
-      @"sv" : @"Starta om Blinker Fluid",
-      @"ar" : @"إعادة تشغيل Blinker Fluid",
+      @"es" : @"Reiniciar Omivayka Browser",
+      @"zh" : @"重新启动 Omivayka Browser",
+      @"ru" : @"Перезапустить Omivayka Browser",
+      @"uk" : @"Перезапустити Omivayka Browser",
+      @"pl" : @"Uruchom ponownie Omivayka Browser",
+      @"cs" : @"Restartovat Omivayka Browser",
+      @"de" : @"Omivayka Browser neu starten",
+      @"ja" : @"Omivayka Browser を再起動",
+      @"ko" : @"Omivayka Browser 재시작",
+      @"vi" : @"Khởi động lại Omivayka Browser",
+      @"tr" : @"Omivayka Browser’ı Yeniden Başlat",
+      @"fr" : @"Redémarrer Omivayka Browser",
+      @"sv" : @"Starta om Omivayka Browser",
+      @"ar" : @"إعادة تشغيل Omivayka Browser",
     }[code]
                ?: english;
   }
-  if ([english isEqualToString:@"Blinker Fluid will close. Open it again to "
+  if ([english isEqualToString:@"Omivayka Browser will close. Open it again to "
                                @"apply."]) {
     return @{
-      @"es" : @"Blinker Fluid se cerrará. Ábrelo de nuevo para aplicar.",
-      @"zh" : @"Blinker Fluid 将关闭。请重新打开以应用。",
-      @"ru" : @"Blinker Fluid закроется. Откройте его снова, чтобы применить.",
+      @"es" : @"Omivayka Browser se cerrará. Ábrelo de nuevo para aplicar.",
+      @"zh" : @"Omivayka Browser 将关闭。请重新打开以应用。",
+      @"ru" : @"Omivayka Browser закроется. Откройте его снова, чтобы применить.",
       @"uk" :
-          @"Blinker Fluid закриється. Відкрийте його знову, щоб застосувати.",
-      @"pl" : @"Blinker Fluid zostanie zamknięty. Otwórz go ponownie, aby "
+          @"Omivayka Browser закриється. Відкрийте його знову, щоб застосувати.",
+      @"pl" : @"Omivayka Browser zostanie zamknięty. Otwórz go ponownie, aby "
               @"zastosować.",
-      @"cs" : @"Blinker Fluid se zavře. Znovu jej otevřete pro použití.",
-      @"de" : @"Blinker Fluid wird beendet. Zum Übernehmen erneut öffnen.",
-      @"ja" : @"Blinker Fluid を終了します。もう一度開くと適用されます。",
-      @"ko" : @"Blinker Fluid가 종료됩니다. 다시 열면 적용됩니다.",
-      @"vi" : @"Blinker Fluid sẽ đóng. Mở lại để áp dụng.",
-      @"tr" : @"Blinker Fluid kapanacak. Uygulamak için tekrar açın.",
-      @"fr" : @"Blinker Fluid va se fermer. Rouvrez-le pour appliquer.",
-      @"sv" : @"Blinker Fluid stängs. Öppna det igen för att tillämpa.",
-      @"ar" : @"سيتم إغلاق Blinker Fluid. افتحه مرة أخرى للتطبيق.",
+      @"cs" : @"Omivayka Browser se zavře. Znovu jej otevřete pro použití.",
+      @"de" : @"Omivayka Browser wird beendet. Zum Übernehmen erneut öffnen.",
+      @"ja" : @"Omivayka Browser を終了します。もう一度開くと適用されます。",
+      @"ko" : @"Omivayka Browser가 종료됩니다. 다시 열면 적용됩니다.",
+      @"vi" : @"Omivayka Browser sẽ đóng. Mở lại để áp dụng.",
+      @"tr" : @"Omivayka Browser kapanacak. Uygulamak için tekrar açın.",
+      @"fr" : @"Omivayka Browser va se fermer. Rouvrez-le pour appliquer.",
+      @"sv" : @"Omivayka Browser stängs. Öppna det igen för att tillämpa.",
+      @"ar" : @"سيتم إغلاق Omivayka Browser. افتحه مرة أخرى للتطبيق.",
     }[code]
                ?: english;
   }
@@ -4140,6 +3999,9 @@ static NSString* BlinkL(NSString* english) {
   static dispatch_once_t dialogsOnce;
   dispatch_once(&dialogsOnce, ^{
     dialogs = @{
+      @"Back" : @{ @"ru" : @"Назад", @"uk" : @"Назад" },
+      @"Forward" : @{ @"ru" : @"Вперёд", @"uk" : @"Вперед" },
+      @"Stop" : @{ @"ru" : @"Остановить", @"uk" : @"Зупинити" },
       @"Save" : @{
         @"es" : @"Guardar",
         @"zh" : @"保存",
@@ -4418,7 +4280,21 @@ static NSString* BlinkL(NSString* english) {
                         : @"Add or manage your saved sign-in";
 }
 
+- (void)updateMainMenuLoadingRow {
+  BlinkListVC* menu = _mainMenu;
+  if (!menu) {
+    return;
+  }
+  BOOL loading = _shell->web_contents()->IsLoading();
+  menu.titles[1] = BlinkL(loading ? @"Stop" : @"Reload");
+  NSMutableArray<NSString*>* images = [menu.imageNames mutableCopy];
+  images[1] = loading ? @"xmark" : @"arrow.clockwise";
+  menu.imageNames = images;
+  [menu.tableView reloadData];
+}
+
 - (void)showMainMenu {
+  [self.view endEditing:YES];
   UIImpactFeedbackGenerator* feedback = [[UIImpactFeedbackGenerator alloc]
       initWithStyle:UIImpactFeedbackStyleLight];
   [feedback impactOccurred];
@@ -4429,13 +4305,14 @@ static NSString* BlinkL(NSString* english) {
                         .ua_string_override.empty();
   BlinkListVC* vc = [[BlinkListVC alloc] init];
   vc.title = BlinkL(@"Menu");
-  vc.compactRows = YES;
+  vc.isMainMenu = YES;
   vc.dismissOnSelect = NO;
   int zoomPercent = BlinkCurrentPageZoomPercent(_shell);
   vc.titles = [@[
     @"Google Account", BlinkL(@"Reload"), BlinkL(@"New Tab"),
-    [NSString stringWithFormat:@"%@ (%zu)", BlinkL(@"Tabs"),
-                               content::Shell::windows().size()],
+    [NSString stringWithFormat:@"%@ (%@)", BlinkL(@"Tabs"),
+        [NSString localizedStringWithFormat:@"%zu",
+            content::Shell::windows().size()]],
     BlinkL(@"Home"), BlinkL(@"Private Browsing"), BlinkL(@"Bookmarks"),
     BlinkL(@"Downloads"),
     isDesktop ? BlinkL(@"Request Mobile Page")
@@ -4527,28 +4404,25 @@ static NSString* BlinkL(NSString* english) {
   };
   UINavigationController* nav =
       [[UINavigationController alloc] initWithRootViewController:vc];
-  nav.modalPresentationStyle = UIModalPresentationPopover;
-  nav.preferredContentSize =
-      CGSizeMake(MIN(340, self.view.bounds.size.width - 36),
-                 MIN(500, self.view.bounds.size.height - 130));
-  UIColor* menuChrome = [UIColor colorWithWhite:0.09 alpha:1.0];
-  // Paint the list background the same grey as the popover chrome, and pad the
-  // bottom so a half-clipped row doesn't bleed into the popover's downward
-  // arrow
-  // ("beak"). No top padding: the orange nav bar sits flush against the first
-  // section header (an upward beak is covered by the opaque nav bar anyway).
-  vc.tableView.backgroundColor = menuChrome;
-  vc.tableView.contentInset = UIEdgeInsetsMake(0, 0, 14, 0);
-  vc.tableView.tableFooterView =
-      [[UIView alloc] initWithFrame:CGRectMake(0, 0, 1, 14)];
-  UIPopoverPresentationController* popover = nav.popoverPresentationController;
-  popover.delegate = self;
-  popover.sourceView = _menuButton;
-  popover.sourceRect = _menuButton.bounds;
-  popover.permittedArrowDirections =
-      UIPopoverArrowDirectionUp | UIPopoverArrowDirectionDown;
-  popover.backgroundColor = menuChrome;
+  nav.modalPresentationStyle = UIModalPresentationCustom;
+  if (@available(iOS 13.0, *)) {
+    nav.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;
+  }
+  nav.transitioningDelegate = self;
+  _mainMenu = vc;
+  [self updateMainMenuLoadingRow];
   [self presentViewController:nav animated:YES completion:nil];
+}
+
+- (UIPresentationController*)
+    presentationControllerForPresentedViewController:(UIViewController*)presented
+                           presentingViewController:(UIViewController*)presenting
+                               sourceViewController:(UIViewController*)source {
+  BlinkMainMenuPresentation* presentation = [[BlinkMainMenuPresentation alloc]
+      initWithPresentedViewController:presented
+             presentingViewController:presenting];
+  presentation.toolbar = _toolbarBackgroundView;
+  return presentation;
 }
 
 - (void)showGoogleAccountMenu {
@@ -4565,7 +4439,7 @@ static NSString* BlinkL(NSString* english) {
   vc.subtitles = [@[
     privateSession
         ? @"Sign in only for this private session"
-        : @"Save the account in Blinker Fluid's normal browser session",
+        : @"Save the account in Omivayka Browser's normal browser session",
     @"Choose another signed-in account",
     @"Security, personal info, and connected services",
     privateSession ? @"Sign out of this private session"
@@ -4707,11 +4581,8 @@ static NSString* BlinkL(NSString* english) {
   UIColor* color = [_tracingHandler isTracing]
                        ? [ContentShellWindowDelegate backgroundColorTracing]
                        : [ContentShellWindowDelegate backgroundColorDefault];
+  _addressBar.backgroundColor = color;
   _toolbarBackgroundView.backgroundColor = color;
-  _toolbarBackgroundView.layer.backgroundColor = color.CGColor;
-  _toolbarContentView.backgroundColor = color;
-  _toolbarContentView.layer.backgroundColor = color.CGColor;
-  _toolbarPaintView.backgroundColor = color;
 }
 
 - (void)stopTracing {
@@ -4736,6 +4607,7 @@ static NSString* BlinkL(NSString* english) {
   BOOL isStartPage = (url.length == 0) || [url isEqualToString:@"about:blank"];
   [self showStartPage:isStartPage];
   _urlField.text = isStartPage ? @"" : url;
+  [self hideSuggestions];
   // A private session records nothing: this list is written to NSUserDefaults
   // in the clear and holds full URLs, including sign-in and OAuth callbacks.
   const BOOL isPrivate =
@@ -4809,10 +4681,215 @@ static NSString* BlinkL(NSString* english) {
 }
 
 - (BOOL)textFieldShouldReturn:(UITextField*)field {
-  [_urlField resignFirstResponder];
-  [self openUserInput:field.text];
+  NSString* input = field.text;
+  [field resignFirstResponder];
+  [self openUserInput:input];
   return YES;
 }
+
+- (void)textFieldDidEndEditing:(UITextField*)field {
+  [self hideSuggestions];
+  if (_addressKeyboardInset != 0) {
+    _addressKeyboardInset = 0;
+    [self layoutBrowserContent];
+  }
+}
+
+#if !BUILDFLAG(IS_IOS_TVOS)
+- (void)addressKeyboardWillChange:(NSNotification*)notification {
+  UIWindow* window = self.view.window;
+  if (!_urlField.isFirstResponder || !window.isKeyWindow) {
+    return;
+  }
+  NSValue* endFrame = notification.userInfo[UIKeyboardFrameEndUserInfoKey];
+  if (!endFrame) {
+    return;
+  }
+  CGRect keyboard = [self.view convertRect:endFrame.CGRectValue
+                       fromCoordinateSpace:window.screen.coordinateSpace];
+  CGRect bounds = self.view.bounds;
+  CGFloat inset =
+      CGRectGetMaxY(keyboard) >= CGRectGetMaxY(bounds) &&
+              CGRectIntersectsRect(keyboard, bounds)
+          ? CGRectGetHeight(CGRectIntersection(keyboard, bounds))
+          : 0;
+  if (inset != _addressKeyboardInset) {
+    _addressKeyboardInset = inset;
+    [self layoutBrowserContent];
+  }
+}
+#endif
+
+#pragma mark - Search suggestions
+
+- (UITableView*)suggestionTable {
+  if (_suggestions) {
+    return _suggestions;
+  }
+  _suggestions = [[UITableView alloc] initWithFrame:CGRectZero
+                                              style:UITableViewStylePlain];
+  _suggestions.rowHeight = 44;
+  _suggestions.dataSource = self;
+  _suggestions.delegate = self;
+  _suggestions.backgroundColor = [UIColor colorWithRed:0.122
+                                                 green:0.122
+                                                  blue:0.137
+                                                 alpha:1.0];
+  _suggestions.separatorColor = [UIColor colorWithWhite:0.2 alpha:1.0];
+  _suggestions.layer.cornerRadius = 12;
+  _suggestions.clipsToBounds = YES;
+  _suggestions.hidden = YES;
+  _suggestions.translatesAutoresizingMaskIntoConstraints = NO;
+  [self.view addSubview:_suggestions];
+  self.view.accessibilityElements = @[
+    _addressBar, _suggestions, _contentView, _toolbarBackgroundView
+  ];
+  _suggestionsHeight =
+      [_suggestions.heightAnchor constraintEqualToConstant:0];
+  _suggestionsHeight.priority = UILayoutPriorityDefaultHigh;
+  NSLayoutConstraint* viewportLimit = [_suggestions.bottomAnchor
+      constraintLessThanOrEqualToAnchor:_contentView.bottomAnchor];
+  viewportLimit.priority = UILayoutPriorityRequired - 1;
+  [NSLayoutConstraint activateConstraints:@[
+    [_suggestions.leadingAnchor constraintEqualToAnchor:_urlField.leadingAnchor],
+    [_suggestions.trailingAnchor
+        constraintEqualToAnchor:_urlField.trailingAnchor],
+    [_suggestions.topAnchor constraintEqualToAnchor:_urlField.bottomAnchor
+                                           constant:8],
+    [_suggestions.heightAnchor constraintGreaterThanOrEqualToConstant:0],
+    viewportLimit, _suggestionsHeight,
+  ]];
+  return _suggestions;
+}
+
+- (void)hideSuggestions {
+  ++_suggestionGeneration;
+  _suggestionTitles = nil;
+  [_suggestionTask cancel];
+  _suggestionTask = nil;
+  _suggestions.hidden = YES;
+}
+
+- (void)searchTextChanged {
+  NSString* term = _urlField.text ?: @"";
+  // Keep inline suggestions limited to blank tabs. Never send edits to the
+  // address of a loaded page to the search provider.
+  if (!_startPage || _startPage.hidden || !_urlField.isFirstResponder) {
+    [self hideSuggestions];
+    return;
+  }
+  // A private session must never hand what is being typed to a search
+  // provider, and the preference (absent means on) can switch it off entirely.
+  NSUserDefaults* defaults = [NSUserDefaults standardUserDefaults];
+  const BOOL enabled =
+      [defaults objectForKey:@"BlinkSearchSuggestions"] == nil ||
+      [defaults boolForKey:@"BlinkSearchSuggestions"];
+  // This request goes out through NSURLSession, which knows nothing about the
+  // proxy configured for the browser's own network stack. Sending it anyway
+  // would put the user's typing on the direct connection they configured Tor
+  // precisely to avoid, so with a proxy set there are no suggestions.
+  const BOOL proxied = [defaults stringForKey:@"BlinkProxy"].length > 0;
+  if (!enabled || proxied ||
+      _shell->web_contents()->GetBrowserContext()->IsOffTheRecord()) {
+    [self hideSuggestions];
+    return;
+  }
+  if (term.length < 2) {
+    [self hideSuggestions];
+    return;
+  }
+  const SearchEngine& engine = kSearchEngines[g_search_engine];
+  if (engine.suggest[0] == '\0') {
+    [self hideSuggestions];
+    return;
+  }
+
+  NSString* escaped = [term stringByAddingPercentEncodingWithAllowedCharacters:
+                                [NSCharacterSet URLQueryAllowedCharacterSet]];
+  NSURL* url =
+      [NSURL URLWithString:[NSString stringWithFormat:@"%s%@", engine.suggest,
+                                                      escaped ?: @""]];
+  if (!url) {
+    [self hideSuggestions];
+    return;
+  }
+
+  const int64_t generation = ++_suggestionGeneration;
+  [_suggestionTask cancel];
+  __weak ContentShellWindowDelegate* weakSelf = self;
+  _suggestionTask = [[NSURLSession sharedSession]
+        dataTaskWithURL:url
+      completionHandler:^(NSData* data, NSURLResponse* response,
+                          NSError* error) {
+        if (error || !data) {
+          return;
+        }
+        id parsed = [NSJSONSerialization JSONObjectWithData:data
+                                                    options:0
+                                                      error:nil];
+        // OpenSearch suggestions: ["typed", ["first", "second", ...], ...].
+        if (![parsed isKindOfClass:NSArray.class] || [parsed count] < 2 ||
+            ![parsed[1] isKindOfClass:NSArray.class]) {
+          return;
+        }
+        NSMutableArray<NSString*>* titles = [NSMutableArray array];
+        for (id entry in parsed[1]) {
+          if ([entry isKindOfClass:NSString.class] && titles.count < 6) {
+            [titles addObject:entry];
+          }
+        }
+        dispatch_async(dispatch_get_main_queue(), ^{
+          ContentShellWindowDelegate* strongSelf = weakSelf;
+          if (!strongSelf || generation != strongSelf->_suggestionGeneration) {
+            return;
+          }
+          [strongSelf showSuggestions:titles];
+        });
+      }];
+  [_suggestionTask resume];
+}
+
+- (void)showSuggestions:(NSArray<NSString*>*)titles {
+  _suggestionTitles = titles;
+  UITableView* table = [self suggestionTable];
+  table.hidden = titles.count == 0;
+  _suggestionsHeight.constant = MIN(titles.count * 44, 220);
+  [self.view bringSubviewToFront:table];
+  [table reloadData];
+}
+
+- (NSInteger)tableView:(UITableView*)table
+    numberOfRowsInSection:(NSInteger)section {
+  return _suggestionTitles.count;
+}
+
+- (UITableViewCell*)tableView:(UITableView*)table
+        cellForRowAtIndexPath:(NSIndexPath*)path {
+  UITableViewCell* cell =
+      [table dequeueReusableCellWithIdentifier:@"suggestion"];
+  if (!cell) {
+    cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault
+                                  reuseIdentifier:@"suggestion"];
+    cell.backgroundColor = UIColor.clearColor;
+    cell.textLabel.textColor = UIColor.whiteColor;
+  }
+  cell.textLabel.text = _suggestionTitles[path.row];
+  cell.imageView.image = BlinkSystemImage(@"magnifyingglass");
+  cell.imageView.tintColor = BlinkerAccentColor();
+  return cell;
+}
+
+- (void)tableView:(UITableView*)table
+    didSelectRowAtIndexPath:(NSIndexPath*)path {
+  [table deselectRowAtIndexPath:path animated:NO];
+  if (path.row >= (NSInteger)_suggestionTitles.count) {
+    return;
+  }
+  NSString* chosen = _suggestionTitles[path.row];
+  [_urlField resignFirstResponder];
+  [self openUserInput:chosen];
+}
+
 
 // Paste a URL or search text copied from another app and open it. A safe paste
 // path that doesn't touch the (crash-prone on iOS 15) web text-input pipeline.
@@ -5021,11 +5098,11 @@ static NSString* BlinkL(NSString* english) {
               }
             }
             NSString* title =
-                newer ? [NSString stringWithFormat:@"Update %@", tag]
-                      : @"Blinker Fluid is Up to Date";
-            NSString* message =
-                [NSString stringWithFormat:@"Installed: %@\nLatest: %@\n\n%@",
-                                           installedVersion, tag, notes];
+                newer ? [NSString stringWithFormat:@"Blinker Fluid %@", tag]
+                      : @"No newer Blinker Fluid release";
+            NSString* message = [NSString stringWithFormat:
+                @"Omivayka Browser: %@\nUpstream: %@\n\n%@",
+                installedVersion, tag, notes];
             UIAlertController* result = [UIAlertController
                 alertControllerWithTitle:title
                                  message:message
@@ -5038,7 +5115,7 @@ static NSString* BlinkL(NSString* english) {
                 canOpenURL:[NSURL URLWithString:@"apple-magnifier://"]];
             if (newer && ipaURL.length && !trollStoreAvailable) {
               [result addAction:[UIAlertAction
-                                    actionWithTitle:@"Download Update"
+                                    actionWithTitle:@"Download Blinker Fluid"
                                               style:UIAlertActionStyleDefault
                                             handler:^(UIAlertAction* action) {
                                               // Loading it here routes the file
@@ -5055,7 +5132,7 @@ static NSString* BlinkL(NSString* english) {
               [result
                   addAction:
                       [UIAlertAction
-                          actionWithTitle:BlinkL(@"Update with TrollStore")
+                          actionWithTitle:@"Install Blinker Fluid with TrollStore"
                                     style:UIAlertActionStyleDefault
                                   handler:^(UIAlertAction* action) {
                                     NSString* encoded = [ipaURL
@@ -5170,7 +5247,6 @@ static NSString* BlinkLanguageName(void) {
   vc.titles = [NSMutableArray array];
   vc.subtitles = [NSMutableArray array];
   NSUserDefaults* d = [NSUserDefaults standardUserDefaults];
-  BOOL bottom = [d boolForKey:@"BlinkToolbarBottom"];
   UIUserInterfaceStyle st = UIUserInterfaceStyleUnspecified;
   if (@available(iOS 13.0, *)) {
     st = self.view.window.overrideUserInterfaceStyle;
@@ -5185,8 +5261,6 @@ static NSString* BlinkLanguageName(void) {
                     stringWithUTF8String:kSearchEngines[g_search_engine].name]];
   [vc.titles addObject:BlinkL(@"Appearance")];
   [vc.subtitles addObject:theme];
-  [vc.titles addObject:BlinkL(@"Toolbar Position")];
-  [vc.subtitles addObject:bottom ? BlinkL(@"Bottom") : BlinkL(@"Top")];
   [vc.titles addObject:BlinkL(@"Languages")];
   [vc.subtitles addObject:BlinkLanguageName()];
   [vc.titles addObject:BlinkL(@"Private Browsing")];
@@ -5219,17 +5293,16 @@ static NSString* BlinkLanguageName(void) {
   [vc.subtitles addObject:@"Recently visited pages"];
   [vc.titles addObject:BlinkL(@"JavaScript Engine")];
   [vc.subtitles addObject:BlinkJITTierTitle(BlinkEffectiveJITTier())];
-  [vc.titles addObject:BlinkL(@"About Blinker Fluid")];
+  [vc.titles addObject:BlinkL(@"About Omivayka Browser")];
   [vc.subtitles addObject:@"Version, source and developer"];
   vc.imageNames = @[
-    @"magnifyingglass", @"circle.lefthalf.filled",
-    @"rectangle.bottomthird.inset.filled", @"globe", @"eye.slash",
+    @"magnifyingglass", @"circle.lefthalf.filled", @"globe", @"eye.slash",
     @"hand.raised.slash", @"lock.shield", @"lock.fill", @"checkmark.shield",
     @"hand.raised", @"trash", @"clock.arrow.circlepath", @"bolt.fill",
     @"info.circle"
   ];
   vc.titleColors = @[
-    [NSNull null], [NSNull null], [NSNull null], [NSNull null], [NSNull null],
+    [NSNull null], [NSNull null], [NSNull null], [NSNull null],
     BlinkerTorColor(), [NSNull null], [NSNull null], [NSNull null],
     [NSNull null], [NSNull null], [NSNull null], [NSNull null], [NSNull null]
   ];
@@ -5237,7 +5310,7 @@ static NSString* BlinkLanguageName(void) {
     BlinkL(@"GENERAL"), BlinkL(@"PRIVACY"), BlinkL(@"PERFORMANCE"),
     BlinkL(@"ABOUT")
   ];
-  vc.sectionStarts = @[ @0, @4, @12, @13 ];
+  vc.sectionStarts = @[ @0, @3, @11, @12 ];
   __weak ContentShellWindowDelegate* weakSelf = self;
   __weak BlinkListVC* weakSettings = vc;
   vc.onSelect = ^(NSInteger i) {
@@ -5246,51 +5319,44 @@ static NSString* BlinkLanguageName(void) {
     } else if (i == 1) {
       [weakSelf showAppearanceMenu];
     } else if (i == 2) {
-      [weakSelf toggleToolbarPosition];
-      BOOL nowBottom = [[NSUserDefaults standardUserDefaults]
-          boolForKey:@"BlinkToolbarBottom"];
-      weakSettings.subtitles[2] =
-          nowBottom ? BlinkL(@"Bottom") : BlinkL(@"Top");
-      [weakSettings.tableView reloadData];
-    } else if (i == 3) {
       [weakSelf showLanguageMenu:weakSettings];
-    } else if (i == 4) {
+    } else if (i == 3) {
       BOOL enabled = ![[NSUserDefaults standardUserDefaults]
           boolForKey:@"BlinkPrivateBrowsing"];
       [[NSUserDefaults standardUserDefaults] setBool:enabled
                                               forKey:@"BlinkPrivateBrowsing"];
       [[NSUserDefaults standardUserDefaults] synchronize];
-      weakSettings.subtitles[4] = [NSString
+      weakSettings.subtitles[3] = [NSString
           stringWithFormat:@"%@ · %@", enabled ? BlinkL(@"On") : BlinkL(@"Off"),
                            BlinkL(@"Restart required")];
       [weakSettings.tableView reloadData];
-    } else if (i == 5) {
+    } else if (i == 4) {
       BOOL nowEnabled = !BlinkAdBlockEnabled();
       BlinkAdBlockSetEnabled(nowEnabled);
       [[NSUserDefaults standardUserDefaults] setBool:nowEnabled
                                               forKey:@"BlinkAdBlock"];
-      weakSettings.subtitles[5] = BlinkAdBlockSubtitle();
+      weakSettings.subtitles[4] = BlinkAdBlockSubtitle();
       [weakSettings.tableView reloadData];
-    } else if (i == 6) {
+    } else if (i == 5) {
       [weakSelf showProxySettings];
-    } else if (i == 7) {
+    } else if (i == 6) {
       [weakSelf toggleAppLockFromSettings:weakSettings];
-    } else if (i == 8) {
+    } else if (i == 7) {
       BOOL enabled = ![[NSUserDefaults standardUserDefaults]
           boolForKey:@"BlinkHTTPSFirst"];
       [[NSUserDefaults standardUserDefaults] setBool:enabled
                                               forKey:@"BlinkHTTPSFirst"];
-      weakSettings.subtitles[8] = enabled ? BlinkL(@"On") : BlinkL(@"Off");
+      weakSettings.subtitles[7] = enabled ? BlinkL(@"On") : BlinkL(@"Off");
       [weakSettings.tableView reloadData];
-    } else if (i == 9) {
+    } else if (i == 8) {
       [weakSelf showWebsitePermissions];
-    } else if (i == 10) {
+    } else if (i == 9) {
       [weakSelf showClearBrowsingData];
-    } else if (i == 11) {
+    } else if (i == 10) {
       [weakSelf showHistory];
-    } else if (i == 12) {
+    } else if (i == 11) {
       [weakSelf showJavaScriptEngineMenu:weakSettings];
-    } else if (i == 13) {
+    } else if (i == 12) {
       [weakSelf showAbout];
     }
   };
@@ -5346,7 +5412,7 @@ static NSString* BlinkLanguageName(void) {
     [defaults synchronize];
 
     weakLanguages.checkedRows = [NSIndexSet indexSetWithIndex:row];
-    weakSettings.subtitles[3] = name;
+    weakSettings.subtitles[2] = name;
     [weakLanguages.tableView reloadData];
     [weakSettings.tableView reloadData];
   };
@@ -5363,8 +5429,8 @@ static NSString* BlinkLanguageName(void) {
   BOOL currentlyEnabled =
       [[NSUserDefaults standardUserDefaults] boolForKey:@"BlinkAppLock"];
   NSString* reason = currentlyEnabled
-                         ? @"Authenticate to turn off Blinker Fluid App Lock"
-                         : @"Authenticate to protect Blinker Fluid";
+                         ? @"Authenticate to turn off Omivayka Browser App Lock"
+                         : @"Authenticate to protect Omivayka Browser";
   __weak ContentShellWindowDelegate* weakSelf = self;
   [context evaluatePolicy:LAPolicyDeviceOwnerAuthentication
           localizedReason:reason
@@ -5378,7 +5444,7 @@ static NSString* BlinkLanguageName(void) {
                             setBool:enabled
                              forKey:@"BlinkAppLock"];
                         g_blink_app_unlocked = enabled;
-                        settings.subtitles[7] =
+                        settings.subtitles[6] =
                             enabled ? BlinkL(@"On") : BlinkL(@"Off");
                         [settings.tableView reloadData];
                         [weakSelf updatePrivacyLock];
@@ -5562,7 +5628,7 @@ static NSString* BlinkLanguageName(void) {
       stringWithUTF8String:std::string(version_info::GetVersionNumber())
                                .c_str()];
   vc.titles = [@[
-    @"Blinker Fluid", @"Chromium Engine", @"GitHub Repository",
+    @"Omivayka Browser", @"Chromium Engine", @"GitHub Repository",
     @"Nodesclock on GitHub", @"Monero (XMR)", @"Litecoin (LTC)"
   ] mutableCopy];
   vc.subtitles = [@[
@@ -5848,7 +5914,7 @@ static NSInteger BlinkEffectiveJITTier(void) {
     [defaults setInteger:tier forKey:@"BlinkJITTier"];
     [defaults setInteger:-1 forKey:@"BlinkJITTierProbe"];
     [defaults synchronize];
-    weakSettings.subtitles[12] = BlinkJITTierTitle(tier);
+    weakSettings.subtitles[11] = BlinkJITTierTitle(tier);
     weakEngine.checkedRows = [NSIndexSet indexSetWithIndex:row];
     [weakSettings.tableView reloadData];
     [weakEngine.tableView reloadData];
@@ -6372,6 +6438,8 @@ void ShellPlatformDelegate::CreatePlatformWindow(
   window.rootViewController = controller;
 
   shell_data.window = window;
+  [NSNotificationCenter.defaultCenter postNotificationName:kBlinkTabsChanged
+                                                   object:nil];
 }
 
 gfx::NativeWindow ShellPlatformDelegate::GetNativeWindow(Shell* shell) {
@@ -6384,6 +6452,11 @@ gfx::NativeWindow ShellPlatformDelegate::GetNativeWindow(Shell* shell) {
 void ShellPlatformDelegate::CleanUp(Shell* shell) {
   DCHECK(shell_data_map_.contains(shell));
   shell_data_map_.erase(shell);
+  // Shell removes itself from windows() after CleanUp returns.
+  dispatch_async(dispatch_get_main_queue(), ^{
+    [NSNotificationCenter.defaultCenter postNotificationName:kBlinkTabsChanged
+                                                     object:nil];
+  });
 }
 
 void ShellPlatformDelegate::SetContents(Shell* shell) {
@@ -6419,13 +6492,9 @@ void ShellPlatformDelegate::EnableUIControl(Shell* shell,
       button = [((ContentShellWindowDelegate*)
                      shell_data.window.rootViewController) forwardButton];
       break;
-    case STOP_BUTTON: {
-      NSString* imageName = is_enabled ? @"ic_stop" : @"ic_reload";
-      [[((ContentShellWindowDelegate*)shell_data.window.rootViewController)
-          reloadOrStopButton] setImage:[UIImage imageNamed:imageName]
-                              forState:UIControlStateNormal];
+    case STOP_BUTTON:
+      // Reload/Stop now lives in the main menu and reads the live load state.
       break;
-    }
     default:
       NOTREACHED() << "Unknown UI control";
   }
@@ -6457,7 +6526,7 @@ void ShellPlatformDelegate::SetIsLoading(Shell* shell, bool loading) {
           isKindOfClass:[ContentShellWindowDelegate class]]) {
     ContentShellWindowDelegate* delegate =
         (ContentShellWindowDelegate*)window.rootViewController;
-    [delegate setPageLoading:loading];
+    [delegate updatePageLoading:loading];
   }
 }
 
@@ -6519,11 +6588,12 @@ void ShellPlatformDelegate::ToggleFullscreenModeForTab(
   // the arranged toolbar content leaves the outer stack and its portrait-era
   // constraints participating in layout after rotation, exposing a large black
   // strip beside/below video.
-  [delegate toolbarBackgroundView].hidden = enter_fullscreen;
+  delegate.addressBar.hidden = enter_fullscreen;
+  delegate.toolbarBackgroundView.hidden = enter_fullscreen;
+  [delegate updatePageLoading:delegate.pageLoading];
   [NSLayoutConstraint deactivateConstraints:delegate.fullscreenConstraints];
   if (enter_fullscreen) {
-    [NSLayoutConstraint deactivateConstraints:delegate.topPosConstraints];
-    [NSLayoutConstraint deactivateConstraints:delegate.bottomPosConstraints];
+    [NSLayoutConstraint deactivateConstraints:delegate.contentVerticalConstraints];
     [NSLayoutConstraint
         deactivateConstraints:delegate.contentHorizontalConstraints];
     UIView* rootView = delegate.view;
@@ -6541,7 +6611,7 @@ void ShellPlatformDelegate::ToggleFullscreenModeForTab(
     delegate.fullscreenConstraints = nil;
     [NSLayoutConstraint
         activateConstraints:delegate.contentHorizontalConstraints];
-    [delegate applyToolbarPosition];
+    [delegate layoutBrowserContent];
   }
   // Keep the screen awake while a video is fullscreen.
   UIApplication.sharedApplication.idleTimerDisabled = enter_fullscreen;

@@ -157,9 +157,10 @@ The Chromium source overlay and main build configuration are available directly 
 
 Blinker Fluid is based on Chromium **M149** at a pinned Chromium revision. The repository does not contain the entire Chromium source tree; instead, the `src/` directory contains the files modified by Blinker Fluid and is intended to be applied over a normal Chromium checkout.
 
-## Building v.0.3.1
+## Building Omivayka Browser for TrollStore
 
-Everything needed to build is in this repository. The packaging steps below create the same two packages as the releases: the normal build and the JIT build. They are the same binary with the same entitlements. The only difference is the bundle identifier: when it ends in `.jit`, Blinker Fluid asks for JIT at runtime, which works on jailbroken devices and with JIT enablers.
+The Omivayka Browser JIT package is built from the pinned Chromium overlay
+below. It updates the installed JIT build under its existing bundle identifier.
 
 ### Requirements
 
@@ -246,97 +247,37 @@ autoninja -C "out/$OUT" -j 2 content_shell
 
 Wait for each command to finish successfully. Build one family at a time. `-j 2` keeps memory use low; raise it if your Mac has plenty of RAM.
 
-### 4. Package the build
+### 4. Package the JIT update
 
-Create the entitlement file used for both packages:
-
-```sh
-cat > "$BLINKER_WORK/blinker.ent" <<'ENT'
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-	<key>com.apple.developer.kernel.extended-virtual-addressing</key>
-	<true/>
-	<key>com.apple.developer.kernel.increased-memory-limit</key>
-	<true/>
-	<key>get-task-allow</key>
-	<true/>
-</dict>
-</plist>
-ENT
-```
-
-Create the home-screen icon and the start-page logo from the artwork in `src/content/shell/app/ios/resources/artwork`:
+Use the original package for the JIT build installed on the target device (or
+its app's `Info.plist`). Build the matching family above. The installed
+identifier, minimum iOS version and build metadata are checked before packaging.
 
 ```sh
-ART="$SRC/src/content/shell/app/ios/resources/artwork"
-ICONS="$BLINKER_WORK/icons"
-mkdir -p "$ICONS"
-sips -s format jpeg "$ART/New Project 20 [0B9169A].png" --out "$ICONS/icon.jpg" >/dev/null
-sips -s format png -z 120 120 "$ICONS/icon.jpg" --out "$ICONS/AppIcon60x60@2x.png" >/dev/null
-sips -s format png -z 180 180 "$ICONS/icon.jpg" --out "$ICONS/AppIcon60x60@3x.png" >/dev/null
-sips -s format png -z 152 152 "$ICONS/icon.jpg" --out "$ICONS/AppIcon76x76@2x.png" >/dev/null
-sips -z 120 120 "$ART/27367.png" --out "$ICONS/blinker_logo.png" >/dev/null
-sips -z 240 240 "$ART/27367.png" --out "$ICONS/blinker_logo@2x.png" >/dev/null
-sips -z 360 360 "$ART/27367.png" --out "$ICONS/blinker_logo@3x.png" >/dev/null
-rm "$ICONS/icon.jpg"
+python3 "$SRC/src/tools/blinker/package_omivayka_jit.py" \
+  "$BLINKER_WORK/src/out/$OUT/content_shell.app" \
+  "/path/to/installed-blinker-jit.tipa" \
+  "$BLINKER_WORK/packages/$OUT"
+shasum -a 256 "$BLINKER_WORK/packages/$OUT/"*.tipa
 ```
 
-Then package both bundles:
+The packager copies the app into a staging directory, installs the Omivayka
+icon, signs the staged bundle with the project entitlements and writes one
+versioned `.tipa`. The original package and build output are kept for rollback.
+If the installed build already has an equal or newer version, raise both
+version fields in `src/content/shell/app/ios/ios-app.plist` before rebuilding.
 
-```sh
-VERSION=0.3.1
-APP="$BLINKER_WORK/src/out/$OUT/content_shell.app"
-PKG="$BLINKER_WORK/packages/$OUT"
-mkdir -p "$PKG"
+Add `--standalone` to package a separate installation with bundle identifier
+`com.wingto.omivayka.jit` and its own app data.
 
-package() {
-  local bundle_id="$1" name="$2" ipa="$3"
-  local work="$(mktemp -d)"
-  mkdir -p "$work/Payload"
-  cp -R "$APP" "$work/Payload/"
-  local app="$work/Payload/content_shell.app"
-  cp "$ICONS/"*.png "$app/"
-  local plist="$app/Info.plist"
-  /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier $bundle_id" "$plist"
-  /usr/libexec/PlistBuddy -c "Set :CFBundleName $name" "$plist"
-  /usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName $name" "$plist"
-  /usr/libexec/PlistBuddy -c "Set :MinimumOSVersion $MIN_OS" "$plist"
-  /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" "$plist"
-  /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $VERSION" "$plist"
-  for framework in "$app"/Frameworks/*.framework; do
-    local binary="$framework/$(basename "$framework" .framework)"
-    [ -f "$binary" ] && ldid -S "$binary"
-  done
-  ldid -S"$BLINKER_WORK/blinker.ent" "$app/content_shell"
-  rm -f "$ipa"
-  (cd "$work" && zip -q9 -r "$ipa" Payload)
-  rm -rf "$work"
-  echo "$ipa"
-}
-
-package "$BUNDLE_ID" "Blinker Fluid" "$PKG/Blinker Fluid v.$VERSION.ipa"
-package "$BUNDLE_ID.jit" "Blinker Fluid JIT" "$PKG/Blinker Fluid v.$VERSION JIT.ipa"
-cp "$PKG/Blinker Fluid v.$VERSION.ipa" "$PKG/Blinker Fluid v.$VERSION TS.tipa"
-cp "$PKG/Blinker Fluid v.$VERSION JIT.ipa" "$PKG/Blinker Fluid v.$VERSION JIT TS.tipa"
-```
-
-The normal and JIT IPAs, plus their TIPA copies for TrollStore, are in:
-
-```text
-$BLINKER_WORK/packages/<selected OUT>/
-```
-
-Package filenames retain the `v.` prefix, for example:
-
-```text
-Blinker Fluid v.0.3.1.ipa
-Blinker Fluid v.0.3.1 JIT.ipa
-```
+Back up the installed browser's data before testing the update in TrollStore.
+Check that ordinary tabs, bookmarks and settings survive, then launch with
+TrollStore's **Open with JIT** and verify the runtime tier on the target device.
+A diagnostic build with `blinker_enable_diagnostics = true` reports
+`JIT_AUTH` and `JIT_TIER`; ordinary release builds keep diagnostics off.
 
 > [!NOTE]
-> The app icon and logo artwork in `src/content/shell/app/ios/resources/artwork` is all drawn by [@Waguriii_draws](https://www.instagram.com/waguriii_draws/) and is probably not covered by the GPL license.
+> The original Blinker Fluid artwork in `src/content/shell/app/ios/resources/artwork` is drawn by [@Waguriii_draws](https://www.instagram.com/waguriii_draws/) and is probably not covered by the GPL license. The Omivayka icon was generated separately.
 
 ## Credits
 
